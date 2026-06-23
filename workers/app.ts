@@ -41,11 +41,16 @@ function getAccessUrls(teamDomain: string) {
 
 // Main app that wraps the API and adds React Router fallback
 const app = new Hono<{ Bindings: Env }>();
-
 // Cloudflare Access JWT validation middleware (production only)
 app.use("*", async (c, next) => {
 	// Skip validation in development
 	if (import.meta.env.DEV) {
+		return next();
+	}
+
+	// API Key authentication for programmatic access (agents)
+	const apiKey = c.env.API_KEY;
+	if (apiKey && c.req.header("Authorization") === `Bearer ${apiKey}`) {
 		return next();
 	}
 
