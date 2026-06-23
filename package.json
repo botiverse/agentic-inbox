@@ -18,7 +18,10 @@
 		"deploy": "npm run build && wrangler deploy",
 		"dev": "react-router dev",
 		"preview": "npm run build && vite preview",
-		"typecheck": "npm run cf-typegen && react-router typegen && tsc -b"
+		"typecheck": "npm run cf-typegen && react-router typegen && tsc -b",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"e2e": "node scripts/e2e-dynamic-mailbox.mjs"
 	},
 	"dependencies": {
 		"@cloudflare/ai-chat": "^0.1.8",
@@ -93,6 +96,7 @@
 		"typescript": "^5.8.3",
 		"vite": "^6.3.3",
 		"vite-tsconfig-paths": "^5.1.4",
+		"vitest": "^3.2.4",
 		"wrangler": "^4.74.0"
 	}
 }

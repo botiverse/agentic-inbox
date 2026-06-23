@@ -16,6 +16,7 @@ import {
 	listMailboxes,
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
+import { parseDomains, isAddressAllowed } from "./lib/allowlist";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -103,8 +104,15 @@ app.post("/api/v1/mailboxes", async (c) => {
 	const { name, settings, email: rawEmail } = CreateMailboxBody.parse(await c.req.json());
 	const email = rawEmail.toLowerCase();
 	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
-	if (allowedAddresses.length > 0 && !allowedAddresses.map((a) => a.toLowerCase()).includes(email)) {
-		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES" }, 403);
+	const allowedDomains = parseDomains(c.env.DOMAINS);
+	// Allow creation if the address is explicitly allowlisted OR under a configured
+	// domain (dynamic self-service). If neither EMAIL_ADDRESSES nor DOMAINS is
+	// configured, fall through unrestricted to preserve upstream behaviour.
+	if (
+		(allowedAddresses.length > 0 || allowedDomains.length > 0) &&
+		!isAddressAllowed(email, allowedAddresses, allowedDomains)
+	) {
+		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES or DOMAINS" }, 403);
 	}
 	const key = `mailboxes/${email}.json`;
 	if (await c.env.BUCKET.head(key)) return c.json({ error: "Mailbox already exists" }, 409);
@@ -352,14 +360,17 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 	if (!parsedEmail.to?.length || !parsedEmail.to[0].address) throw new Error("received email with empty to");
 
 	const allowedAddresses = ((env.EMAIL_ADDRESSES ?? []) as string[]).map((a) => a.toLowerCase());
+	const allowedDomains = parseDomains(env.DOMAINS);
 	const allRecipients = parsedEmail.to.map((t) => t.address?.toLowerCase()).filter(Boolean) as string[];
 	const ccRecipients = (parsedEmail.cc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
 	const bccRecipients = (parsedEmail.bcc || []).map((e) => e.address?.toLowerCase()).filter(Boolean) as string[];
 
 	let mailboxId: string | undefined;
-	if (allowedAddresses.length > 0) {
-		mailboxId = allRecipients.find((addr) => allowedAddresses.includes(addr));
-		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`); return; }
+	if (allowedAddresses.length > 0 || allowedDomains.length > 0) {
+		// Accept a recipient that is explicitly allowlisted OR under a configured domain.
+		// Mailbox existence (checked below) remains the real delivery gate.
+		mailboxId = allRecipients.find((addr) => isAddressAllowed(addr, allowedAddresses, allowedDomains));
+		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES or DOMAINS.`); return; }
 	} else { mailboxId = allRecipients[0]; }
 	if (!mailboxId) throw new Error("received email with no valid recipient address");
 
