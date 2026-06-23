@@ -101,7 +101,16 @@ app.get("/api/v1/mailboxes", async (c) => {
 });
 
 app.post("/api/v1/mailboxes", async (c) => {
-	const { name, settings, email: rawEmail } = CreateMailboxBody.parse(await c.req.json());
+	let parsed: z.infer<typeof CreateMailboxBody>;
+	try {
+		parsed = CreateMailboxBody.parse(await c.req.json());
+	} catch (e) {
+		// Invalid JSON or schema violation (e.g. non-email `email`, missing `name`).
+		// Return a clean 400 instead of letting the error surface as a 500.
+		const detail = e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : "malformed request body";
+		return c.json({ error: `Invalid request body: ${detail}` }, 400);
+	}
+	const { name, settings, email: rawEmail } = parsed;
 	const email = rawEmail.toLowerCase();
 	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
 	const allowedDomains = parseDomains(c.env.DOMAINS);
