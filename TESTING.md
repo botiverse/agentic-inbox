@@ -25,20 +25,26 @@ mailbox-create gate and the inbound-receive gate:
 ## Layer B — live end-to-end smoke (proves the goal; new QA pattern)
 
 Runs against the **deployed** worker. Proves a brand-new, dynamically-created
-mailbox receives a real email end-to-end (worker → CF EMAIL → catch-all Email
-Routing → `receiveEmail` → inbox) with **no redeploy** — and cleans up after.
+mailbox receives a **real external email** end-to-end (mails.dev → CF Email
+Routing catch-all → `receiveEmail` → inbox) with **no redeploy** — and cleans up.
 
 ```bash
-AGENTIC_INBOX_TOKEN=sk_aibx_... npm run e2e
+AGENTIC_INBOX_TOKEN=sk_aibx_... MAILS_DEV_API_KEY=mk_... npm run e2e
 ```
 
-Optional env: `AGENTIC_INBOX_URL`, `E2E_DOMAIN` (default `mail.build`),
+Optional env: `AGENTIC_INBOX_URL`, `MAILS_DEV_SEND_URL` (default
+`https://api.mails.dev/v1/send`), `E2E_DOMAIN` (default `mail.build`),
 `E2E_NAMESPACE` (default `postel-e2e`), `E2E_TIMEOUT_MS`, `E2E_POLL_MS`.
 
-Because real delivery has latency/variance, Layer B is **not** a per-commit gate —
-run it on demand and on a schedule. The script is also the new QA
-onboarding-mailbox pattern: an ephemeral unique mailbox per run, no literal
-pre-allocation (replaces the 30 `pai-onboard-daily-NNN` literals).
+Why an external sender (mails.dev) instead of the worker's own send API:
+Cloudflare's `send_email` binding only delivers to **verified** destination
+addresses, so the worker can't self-send to an arbitrary dynamic alias.
+mails.dev is an external HTTP sender that faithfully exercises the real inbound
+path. It has a **monthly send quota** (100/mo on the current plan), so Layer B is
+**not** a per-commit gate — run it on demand / on a schedule. The script is also
+the new QA onboarding-mailbox pattern: an ephemeral unique mailbox per run, no
+literal pre-allocation (replaces the 30 `pai-onboard-daily-NNN` literals).
 
-The API key is a CF Worker secret — keep it out of source and out of public
-channels (e.g. `.secrets/agentic-inbox-token.txt`, gitignored, mode 600).
+Keys are secrets — keep them out of source and out of public channels
+(e.g. `.secrets/agentic-inbox-token.txt`, `.secrets/mails-dev-api-key.txt`,
+gitignored, mode 600).
