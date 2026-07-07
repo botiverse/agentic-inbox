@@ -16,6 +16,7 @@
 		"DOMAINS": "mail.build",
 		"EMAIL_ADDRESSES": [
 			"gogo@mail.build",
+			"mobile-qa@mail.build",
 			"ray@mail.build",
 			"jianwei@mail.build",
 			"dozy@mail.build",
