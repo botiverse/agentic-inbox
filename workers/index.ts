@@ -18,7 +18,7 @@ import {
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
 import { canCreateMailbox, planForOwner } from "./lib/auth";
-import { mintKey, mintToken, recordOwnedMailbox, countOwnedMailboxes } from "./lib/keyRegistry";
+import { mintKey, mintToken, recordOwnedMailbox, countOwnedMailboxes, listOwnedMailboxes } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -98,6 +98,13 @@ app.get("/api/v1/config", (c) => {
 // -- Mailboxes ------------------------------------------------------
 
 app.get("/api/v1/mailboxes", async (c) => {
+	// Scoped-key callers see only their own mailboxes; admin / legacy sees all.
+	const authScope = c.get("authScope");
+	const owner = c.get("authOwner");
+	if (authScope && authScope !== "admin" && owner) {
+		const owned = await listOwnedMailboxes(c.env, owner);
+		return c.json(owned.map((id) => ({ id, email: id, name: id })));
+	}
 	const allMailboxes = await listMailboxes(c.env.BUCKET);
 	return c.json(allMailboxes.map((m) => ({ ...m, name: m.id })));
 });

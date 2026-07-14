@@ -88,6 +88,24 @@ export async function recordOwnedMailbox(
 	await kv.put(`mbox:${owner}:${email}`, "1");
 }
 
+/** List the email addresses of mailboxes owned by `owner` (from the index). */
+export async function listOwnedMailboxes(
+	env: { AGENTIC_INBOX_KEYS?: KVNamespace },
+	owner: string,
+): Promise<string[]> {
+	const kv = keyKV(env);
+	if (!kv) return [];
+	const prefix = `mbox:${owner}:`;
+	const emails: string[] = [];
+	let cursor: string | undefined;
+	do {
+		const res = await kv.list({ prefix, cursor });
+		for (const k of res.keys) emails.push(k.name.slice(prefix.length));
+		cursor = res.list_complete ? undefined : res.cursor;
+	} while (cursor);
+	return emails;
+}
+
 /** Count mailboxes owned by `owner` (from the per-owner index). */
 export async function countOwnedMailboxes(
 	env: { AGENTIC_INBOX_KEYS?: KVNamespace },
