@@ -52,6 +52,78 @@ export function reservedHandleForAddress(address: string): string {
 	return reservedHandleForLocalPart(address.toLowerCase().split("@")[0] ?? "");
 }
 
+// ── 3-resource model: Owner / Mailbox / Access Key ────────────────
+// (locked 2026-07-12) Ownership modeled by Owner; access credential scoped by
+// resource. A key's scope is either a specific mailbox id, the whole account,
+// or admin (all).
+
+export type KeyScope = string; // a mailboxId, or "account", or "admin"
+
+export interface AccessKeyRecord {
+	owner: string; // e.g. raft:${server_id}:agent:${sub}, or local:admin
+	scope: KeyScope;
+}
+
+export interface MailboxRef {
+	id: string; // full email address, the resource key
+	owner: string | null | undefined;
+}
+
+/**
+ * Whether an access key authorizes an operation on a mailbox.
+ * - `admin` scope → any mailbox.
+ * - otherwise the caller must OWN the mailbox, AND
+ *   - `account` scope → any mailbox the owner holds;
+ *   - a mailbox-id scope → only that exact mailbox (finest isolation).
+ */
+export function mailboxAccessAllowed(key: AccessKeyRecord, mailbox: MailboxRef): boolean {
+	if (key.scope === "admin") return true;
+	if (!mailbox.owner || mailbox.owner !== key.owner) return false;
+	if (key.scope === "account") return true;
+	return key.scope === mailbox.id;
+}
+
+/**
+ * Derive the canonical Owner id from Raft/Slock OAuth userinfo.
+ * Trust ONLY type/sub/server_id (never preferred_username/name). Returns null
+ * if the required claims are missing.
+ */
+export function ownerFromRaftUserinfo(
+	userinfo: { type?: string; sub?: string; server_id?: string } | null | undefined,
+): string | null {
+	if (!userinfo?.type || !userinfo.sub || !userinfo.server_id) return null;
+	return `raft:${userinfo.server_id}:${userinfo.type}:${userinfo.sub}`;
+}
+
+// ── Tiering / quota ────────────────────────────────────────────────
+// Mechanism only; the numbers are a pricing/PM decision. free=1 is tygg's
+// confirmed first rule (2026-07-13).
+
+export interface PlanLimits {
+	maxMailboxes: number;
+}
+
+export const DEFAULT_PLAN_LIMITS: Record<string, PlanLimits> = {
+	free: { maxMailboxes: 1 },
+	pro: { maxMailboxes: 100 },
+};
+
+export function maxMailboxesForPlan(
+	plan: string | null | undefined,
+	limits: Record<string, PlanLimits> = DEFAULT_PLAN_LIMITS,
+): number {
+	return (limits[plan ?? "free"] ?? limits.free).maxMailboxes;
+}
+
+/** Whether an owner on `plan` may create another mailbox given their current count. */
+export function canCreateMailbox(
+	plan: string | null | undefined,
+	currentOwnedCount: number,
+	limits: Record<string, PlanLimits> = DEFAULT_PLAN_LIMITS,
+): boolean {
+	return currentOwnedCount < maxMailboxesForPlan(plan, limits);
+}
+
 /**
  * Whether `callerHandle` may CREATE a mailbox with this local-part.
  * - Always allowed within the caller's own reserved prefix (`<caller>`/`<caller>-*`).

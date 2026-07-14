@@ -5,6 +5,10 @@ import {
 	reservedHandleForLocalPart,
 	reservedHandleForAddress,
 	createAllowedByPrefix,
+	mailboxAccessAllowed,
+	ownerFromRaftUserinfo,
+	maxMailboxesForPlan,
+	canCreateMailbox,
 } from "./auth";
 
 describe("hashApiKey", () => {
@@ -58,5 +62,58 @@ describe("createAllowedByPrefix (anti-squat)", () => {
 	});
 	it("allows a free name not reserved by anyone", () => {
 		expect(createAllowedByPrefix("team-newsletter", "bob", false)).toBe(true);
+	});
+});
+
+describe("mailboxAccessAllowed (scoped keys)", () => {
+	const alice = "raft:s1:agent:alice";
+	const bob = "raft:s1:agent:bob";
+	const boxA = { id: "alice@mail.build", owner: alice };
+	const boxA2 = { id: "alice-ci@mail.build", owner: alice };
+	const boxB = { id: "bob@mail.build", owner: bob };
+
+	it("admin scope accesses any mailbox", () => {
+		expect(mailboxAccessAllowed({ owner: "local:admin", scope: "admin" }, boxB)).toBe(true);
+	});
+	it("mailbox-scoped key accesses ONLY its one mailbox", () => {
+		const key = { owner: alice, scope: "alice@mail.build" };
+		expect(mailboxAccessAllowed(key, boxA)).toBe(true);
+		expect(mailboxAccessAllowed(key, boxA2)).toBe(false); // same owner, different box → denied
+		expect(mailboxAccessAllowed(key, boxB)).toBe(false);
+	});
+	it("account-scoped key accesses all the owner's mailboxes but not others'", () => {
+		const key = { owner: alice, scope: "account" };
+		expect(mailboxAccessAllowed(key, boxA)).toBe(true);
+		expect(mailboxAccessAllowed(key, boxA2)).toBe(true);
+		expect(mailboxAccessAllowed(key, boxB)).toBe(false); // cross-owner denied
+	});
+	it("denies when mailbox is owner-less (non-admin)", () => {
+		expect(mailboxAccessAllowed({ owner: alice, scope: "account" }, { id: "x@mail.build", owner: null })).toBe(false);
+	});
+});
+
+describe("ownerFromRaftUserinfo", () => {
+	it("derives raft:server:type:sub, trusting only type/sub/server_id", () => {
+		expect(ownerFromRaftUserinfo({ type: "agent", sub: "abc", server_id: "s1", preferred_username: "Alice" } as any))
+			.toBe("raft:s1:agent:abc");
+		expect(ownerFromRaftUserinfo({ type: "human", sub: "h1", server_id: "s1" })).toBe("raft:s1:human:h1");
+	});
+	it("returns null when required claims missing", () => {
+		expect(ownerFromRaftUserinfo({ type: "agent", sub: "abc" })).toBeNull();
+		expect(ownerFromRaftUserinfo(null)).toBeNull();
+	});
+});
+
+describe("tiering / quota", () => {
+	it("free = 1 mailbox (tygg's first rule); pro higher", () => {
+		expect(maxMailboxesForPlan("free")).toBe(1);
+		expect(maxMailboxesForPlan("pro")).toBe(100);
+		expect(maxMailboxesForPlan(undefined)).toBe(1); // default to free
+		expect(maxMailboxesForPlan("mystery")).toBe(1); // unknown plan → free
+	});
+	it("canCreateMailbox gates free at 1", () => {
+		expect(canCreateMailbox("free", 0)).toBe(true);
+		expect(canCreateMailbox("free", 1)).toBe(false); // 2nd mailbox blocked
+		expect(canCreateMailbox("pro", 1)).toBe(true);
 	});
 });
