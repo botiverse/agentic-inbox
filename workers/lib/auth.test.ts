@@ -9,6 +9,8 @@ import {
 	ownerFromRaftUserinfo,
 	maxMailboxesForPlan,
 	canCreateMailbox,
+	serverIdFromOwner,
+	planForOwner,
 } from "./auth";
 
 describe("hashApiKey", () => {
@@ -105,15 +107,29 @@ describe("ownerFromRaftUserinfo", () => {
 });
 
 describe("tiering / quota", () => {
-	it("free = 1 mailbox (tygg's first rule); pro higher", () => {
+	it("free = 1 mailbox; pro = 10 (tygg 2026-07-14)", () => {
 		expect(maxMailboxesForPlan("free")).toBe(1);
-		expect(maxMailboxesForPlan("pro")).toBe(100);
+		expect(maxMailboxesForPlan("pro")).toBe(10);
 		expect(maxMailboxesForPlan(undefined)).toBe(1); // default to free
 		expect(maxMailboxesForPlan("mystery")).toBe(1); // unknown plan → free
 	});
-	it("canCreateMailbox gates free at 1", () => {
+	it("canCreateMailbox gates free at 1, pro at 10", () => {
 		expect(canCreateMailbox("free", 0)).toBe(true);
 		expect(canCreateMailbox("free", 1)).toBe(false); // 2nd mailbox blocked
-		expect(canCreateMailbox("pro", 1)).toBe(true);
+		expect(canCreateMailbox("pro", 9)).toBe(true);
+		expect(canCreateMailbox("pro", 10)).toBe(false); // 11th blocked
+	});
+});
+
+describe("plan by raft-server tier", () => {
+	it("extracts server_id from owner id", () => {
+		expect(serverIdFromOwner("raft:s-123:agent:abc")).toBe("s-123");
+		expect(serverIdFromOwner("local:admin")).toBeNull();
+		expect(serverIdFromOwner(null)).toBeNull();
+	});
+	it("owner on a pro server → pro (10); else free (1)", () => {
+		expect(planForOwner("raft:s-pro:agent:a", ["s-pro"])).toBe("pro");
+		expect(planForOwner("raft:s-free:agent:a", ["s-pro"])).toBe("free");
+		expect(planForOwner("raft:s-free:agent:a", [])).toBe("free");
 	});
 });

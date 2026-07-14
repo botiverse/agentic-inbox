@@ -103,9 +103,12 @@ export interface PlanLimits {
 	maxMailboxes: number;
 }
 
+// free = 1 mailbox; pro = up to 10 per agent (tygg 2026-07-14). The plan is
+// typically derived from the raft server's tier (server_id), not the individual
+// account — but this table only needs the plan name → limit mapping.
 export const DEFAULT_PLAN_LIMITS: Record<string, PlanLimits> = {
 	free: { maxMailboxes: 1 },
-	pro: { maxMailboxes: 100 },
+	pro: { maxMailboxes: 10 },
 };
 
 export function maxMailboxesForPlan(
@@ -113,6 +116,22 @@ export function maxMailboxesForPlan(
 	limits: Record<string, PlanLimits> = DEFAULT_PLAN_LIMITS,
 ): number {
 	return (limits[plan ?? "free"] ?? limits.free).maxMailboxes;
+}
+
+/** Extract the raft server_id from an owner id (`raft:<server_id>:<type>:<sub>`). */
+export function serverIdFromOwner(owner: string | null | undefined): string | null {
+	const m = (owner ?? "").match(/^raft:([^:]+):/);
+	return m ? m[1] : null;
+}
+
+/**
+ * Derive a plan for an owner. Tiering is at the raft-server level: an owner
+ * whose server_id is in `proServerIds` is `pro`, otherwise `free`.
+ * (free=1 mailbox, pro=10 — tygg 2026-07-14.)
+ */
+export function planForOwner(owner: string, proServerIds: string[]): "free" | "pro" {
+	const sid = serverIdFromOwner(owner);
+	return sid && proServerIds.includes(sid) ? "pro" : "free";
 }
 
 /** Whether an owner on `plan` may create another mailbox given their current count. */

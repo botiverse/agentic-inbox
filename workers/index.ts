@@ -17,6 +17,8 @@ import {
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
+import { canCreateMailbox, planForOwner } from "./lib/auth";
+import { mintKey, mintToken, recordOwnedMailbox, countOwnedMailboxes } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -112,6 +114,12 @@ app.post("/api/v1/mailboxes", async (c) => {
 	}
 	const { name, settings, email: rawEmail } = parsed;
 	const email = rawEmail.toLowerCase();
+
+	// Claim requires an authenticated owner (agent scoped key or human session).
+	const owner = c.get("authOwner");
+	if (!owner) return c.json({ error: "Authentication required" }, 401);
+	const isAdmin = c.get("authIsAdmin") === true;
+
 	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
 	const allowedDomains = parseDomains(c.env.DOMAINS);
 	// Allow creation if the address is explicitly allowlisted OR under a configured
@@ -123,14 +131,32 @@ app.post("/api/v1/mailboxes", async (c) => {
 	) {
 		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES or DOMAINS" }, 403);
 	}
+
+	// Tier quota: free = 1 mailbox, pro = 10 (pro = raft-server tier). Admin exempt.
+	if (!isAdmin) {
+		const plan = planForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS));
+		const owned = await countOwnedMailboxes(c.env, owner);
+		if (!canCreateMailbox(plan, owned)) {
+			return c.json({ error: `Mailbox quota reached for plan '${plan}'`, plan, owned }, 403);
+		}
+	}
+
 	const key = `mailboxes/${email}.json`;
 	if (await c.env.BUCKET.head(key)) return c.json({ error: "Mailbox already exists" }, 409);
 	const defaultSettings = { fromName: name, forwarding: { enabled: false, email: "" }, signature: { enabled: false, text: "" }, autoReply: { enabled: false, subject: "", message: "" } };
-	const finalSettings = { ...defaultSettings, ...settings };
+	// `owner` is the source of truth for mailbox ownership (API access is scoped to it).
+	const finalSettings = { ...defaultSettings, ...settings, owner };
 	await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
+	await recordOwnedMailbox(c.env, owner, email);
 	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
 	await stub.getFolders();
-	return c.json({ id: email, email, name, settings: finalSettings }, 201);
+
+	// Mint a mailbox-scoped access key — returned ONCE (finest isolation: this
+	// key can only touch this one mailbox).
+	const token = mintToken();
+	await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
+
+	return c.json({ id: email, email, name, owner, settings: finalSettings, key: token }, 201);
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
