@@ -53,7 +53,10 @@ describe("session seal/open round-trip", () => {
 	it("returns null for a tampered ciphertext", async () => {
 		const sealed = await sealSession({ principal, expiresAt: Date.now() + 60_000 }, SECRET);
 		const [iv, ct] = sealed.split(".");
-		const flipped = ct.slice(0, -1) + (ct.slice(-1) === "A" ? "B" : "A");
+		// Tamper the FIRST base64url char (top 6 bits of ciphertext byte 0) — always
+		// significant, so the decoded bytes always change and GCM auth always fails.
+		// Flipping the LAST char can hit only padding bits (no-op decode) → flaky.
+		const flipped = (ct[0] === "A" ? "B" : "A") + ct.slice(1);
 		const cookie = sessionCookie(new Request("https://mail.build/"), `${iv}.${flipped}`, 60);
 		expect(await openSession(reqWithCookie(cookie), SECRET)).toBeNull();
 	});

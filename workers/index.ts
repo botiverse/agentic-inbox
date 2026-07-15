@@ -14,6 +14,7 @@ import {
 	generateMessageId,
 	buildThreadingHeaders,
 	listMailboxes,
+	getFullEmail,
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
@@ -317,11 +318,20 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 });
 
 app.get("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
-	const email = await c.var.mailboxStub.getEmail(c.req.param("id")!);
+	const email = await getFullEmail(c.var.mailboxStub, c.req.param("id")!);
 	if (!email) return c.json({ error: "Email not found" }, 404);
-	return new Response(JSON.stringify(email), {
-		headers: { "Content-Type": "application/json" },
-	});
+	// Stable agent-facing contract: `body_text` (HTML stripped to plain) and
+	// `body_html` come from getFullEmail; add `from`/`to` aliases over the stored
+	// `sender`/`recipient`. Original fields (sender/recipient/body) are kept for
+	// the human UI. body_html is null when the message had no HTML part.
+	const e = email as typeof email & { sender?: string; recipient?: string; body?: string };
+	const withContract = {
+		...e,
+		from: e.sender,
+		to: e.recipient,
+		body_html: e.body ? e.body_html : null,
+	};
+	return c.json(withContract);
 });
 
 app.put("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {

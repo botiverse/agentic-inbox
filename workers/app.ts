@@ -223,7 +223,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "get-email",
-					description: "Read a single email in one of your mailboxes.",
+					description: "Read a single email in one of your mailboxes. Returns a structured (not raw MIME) object: from/to (aliases of sender/recipient), subject, date, body_text (HTML stripped to plain — safe to grep for codes/links), body_html (null when there was no HTML part), snippet, read, and raw_headers.",
 					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails/{id}" },
 				},
 			],
