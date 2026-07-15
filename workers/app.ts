@@ -71,6 +71,7 @@ function isAuthExemptPath(pathname: string): boolean {
 export { MailboxDO } from "./durableObject";
 export { EmailAgent } from "./agent";
 export { EmailMCP } from "./mcp";
+export { OwnerDO } from "./ownerDO";
 
 declare module "react-router" {
 	export interface AppLoadContext {
@@ -225,6 +226,11 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 					name: "get-email",
 					description: "Read a single email in one of your mailboxes. Returns a structured (not raw MIME) object: from/to (aliases of sender/recipient), subject, date, body_text (HTML stripped to plain — safe to grep for codes/links), body_html (null when there was no HTML part), snippet, read, and raw_headers.",
 					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails/{id}" },
+				},
+				{
+					name: "release-mailbox",
+					description: "Release (delete) a mailbox you own, freeing the quota slot so you can claim another. Use this to clean up throwaway / verification mailboxes.",
+					endpoint: { method: "DELETE", path: "/api/v1/mailboxes/{mailboxId}" },
 				},
 			],
 		},

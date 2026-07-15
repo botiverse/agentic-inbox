@@ -18,8 +18,8 @@ import {
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
-import { canCreateMailbox, planForOwner, claimAllowedForHandle, classifyClaim } from "./lib/auth";
-import { mintKey, mintToken, recordOwnedMailbox, countOwnedMailboxes, listOwnedMailboxes } from "./lib/keyRegistry";
+import { maxMailboxesForPlan, planForOwner, claimAllowedForHandle, classifyClaim } from "./lib/auth";
+import { mintKey, mintToken, recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -86,6 +86,10 @@ app.use("/api/*", cors({
 	},
 }));
 app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
+// Also guard the bare single-mailbox routes (GET/PUT settings, DELETE) — the
+// `/*` pattern above only matches sub-paths, so without this a scoped-key caller
+// could read/modify/delete a mailbox they don't own.
+app.use("/api/v1/mailboxes/:mailboxId", requireMailbox);
 
 // -- Config ---------------------------------------------------------
 
@@ -103,7 +107,10 @@ app.get("/api/v1/mailboxes", async (c) => {
 	const authScope = c.get("authScope");
 	const owner = c.get("authOwner");
 	if (authScope && authScope !== "admin" && owner) {
-		const owned = await listOwnedMailboxes(c.env, owner);
+		// Strongly-consistent list from the per-owner DO (no kv.list lag, so a
+		// just-claimed mailbox shows immediately — dogfood: Box).
+		const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
+		const owned = await ownerStub.list(owner);
 		return c.json(owned.map(({ email, name }) => ({ id: email, email, name })));
 	}
 	const allMailboxes = await listMailboxes(c.env.BUCKET);
@@ -176,15 +183,6 @@ app.post("/api/v1/mailboxes", async (c) => {
 		// action === "adopt": fall through.
 	}
 
-	// Tier quota (a fresh claim OR an orphan adoption both consume a slot). Admin exempt.
-	if (!isAdmin) {
-		const plan = planForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS));
-		const owned = await countOwnedMailboxes(c.env, owner);
-		if (!canCreateMailbox(plan, owned)) {
-			return c.json({ error: `Mailbox quota reached for plan '${plan}'`, code: "QUOTA_EXCEEDED", plan, owned }, 403);
-		}
-	}
-
 	const adopting = existingSettings !== null;
 	const defaultSettings = { fromName: name, forwarding: { enabled: false, email: "" }, signature: { enabled: false, text: "" }, autoReply: { enabled: false, subject: "", message: "" } };
 	// Adoption preserves the existing mailbox settings (and its stored mail);
@@ -193,17 +191,40 @@ app.post("/api/v1/mailboxes", async (c) => {
 	const finalSettings = adopting
 		? { ...(existingSettings as Record<string, unknown>), owner }
 		: { ...defaultSettings, ...settings, owner };
-	await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
-	await recordOwnedMailbox(c.env, owner, email, (finalSettings.fromName as string) || name);
-	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
-	await stub.getFolders();
+	const displayName = (finalSettings as { fromName?: string }).fromName || name;
+
+	// Tier quota (a fresh claim OR an orphan adoption both consume a slot). This
+	// is an ATOMIC check-and-reserve in the per-owner DO — strongly consistent, so
+	// two rapid claims can't both slip past the limit (dogfood: Cardy — the old
+	// kv.list count lagged ~60s and let a 3rd mailbox through on free=1). Admin
+	// gets an effectively unlimited allowance but is still recorded.
+	const plan = planForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS));
+	const limit = isAdmin ? Number.MAX_SAFE_INTEGER : maxMailboxesForPlan(plan);
+	const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
+	const reservation = await ownerStub.reserve(owner, email, displayName, limit);
+	if (!reservation.ok) {
+		return c.json({ error: `Mailbox quota reached for plan '${plan}'`, code: "QUOTA_EXCEEDED", plan, owned: reservation.owned }, 403);
+	}
+
+	try {
+		await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
+		const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
+		await stub.getFolders();
+	} catch (e) {
+		// Don't leak a reserved slot if provisioning fails after reserving.
+		await ownerStub.release(owner, email).catch(() => {});
+		throw e;
+	}
+	// Keep the legacy KV index in sync (seed source / backfill safety net; the DO
+	// is the count+list authority).
+	await recordOwnedMailbox(c.env, owner, email, displayName);
 
 	// Mint a mailbox-scoped access key — returned ONCE (finest isolation: this
 	// key can only touch this one mailbox).
 	const token = mintToken();
 	await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
 
-	return c.json({ id: email, email, name: (finalSettings.fromName as string) || name, owner, settings: finalSettings, key: token, adopted: adopting || undefined }, adopting ? 200 : 201);
+	return c.json({ id: email, email, name: displayName, owner, settings: finalSettings, key: token, adopted: adopting || undefined }, adopting ? 200 : 201);
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
@@ -222,11 +243,20 @@ app.put("/api/v1/mailboxes/:mailboxId", async (c) => {
 	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings });
 });
 
-app.delete("/api/v1/mailboxes/:mailboxId", async (c) => {
+app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
+	// Ownership is enforced by requireMailbox; release the quota slot so the owner
+	// can reclaim it (dogfood: Duoyu — testers had no way to free a slot / clean up
+	// residue, so each trial permanently burned a mailbox against the quota).
 	const mailboxId = c.req.param("mailboxId")!;
 	const key = `mailboxes/${mailboxId}.json`;
 	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
 	await c.env.BUCKET.delete(key); // TODO: also delete DO data and R2 attachment blobs
+	const owner = c.get("authOwner");
+	if (owner) {
+		const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
+		await ownerStub.release(owner, mailboxId);
+		await removeOwnedMailbox(c.env, owner, mailboxId);
+	}
 	return c.body(null, 204);
 });
 

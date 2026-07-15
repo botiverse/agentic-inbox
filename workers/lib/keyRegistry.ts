@@ -92,6 +92,17 @@ export async function recordOwnedMailbox(
 	await kv.put(`mbox:${owner}:${email}`, "1", name ? { metadata: { name } } : undefined);
 }
 
+/** Remove `owner`'s index entry for `email` (mailbox released/deleted). */
+export async function removeOwnedMailbox(
+	env: { AGENTIC_INBOX_KEYS?: KVNamespace },
+	owner: string,
+	email: string,
+): Promise<void> {
+	const kv = keyKV(env);
+	if (!kv) return;
+	await kv.delete(`mbox:${owner}:${email}`);
+}
+
 /** List mailboxes owned by `owner` (from the index), with the display name
  * carried in KV metadata. `name` falls back to the address for pre-metadata rows. */
 export async function listOwnedMailboxes(
