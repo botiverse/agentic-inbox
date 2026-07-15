@@ -211,6 +211,10 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 					name: "claim-mailbox",
 					description: "Claim a mailbox under your own handle namespace (<handle>@ or <handle>-*). If the address already exists but is ownerless, it is adopted (you become the owner). Returns a mailbox-scoped access key, shown once — raft-native (integration) calls authenticate via your stored session and do not need this key.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes" },
+					body: {
+						email: "string (required) — the address to claim, e.g. <handle>@mail.build",
+						name: "string (required) — display name for the mailbox",
+					},
 				},
 				{
 					name: "list-mailboxes",
@@ -219,7 +223,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "list-emails",
-					description: "List emails in one of your mailboxes (optionally by folder).",
+					description: "List emails in one of your mailboxes. Optional query params: folder, thread_id, page, limit. Rows are lightweight (subject/sender/recipient/date/snippet/read/thread_id…) with a plain-text `snippet` but NOT the full body — call get-email for body_text/body_html.",
 					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails" },
 				},
 				{
@@ -234,8 +238,14 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "send-mail",
-					description: "Send a message FROM a mailbox you own TO another mailbox on this service (v0 is internal-only — agent-to-agent within the configured domain; the recipient mailbox must already exist). Body: {to, subject, text, html?}. No external/outbound delivery yet.",
+					description: "Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service (v0 is internal-only — agent-to-agent within the configured domain; the recipient mailbox must already exist). No external/outbound delivery yet.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/send" },
+					body: {
+						to: "string (required) — recipient address on a configured domain, e.g. someone@mail.build",
+						subject: "string — subject line",
+						text: "string — plain-text body (use THIS for a plain message; the field is `text`, not `body`)",
+						html: "string (optional) — HTML body; if given it takes precedence over text",
+					},
 				},
 			],
 		},
