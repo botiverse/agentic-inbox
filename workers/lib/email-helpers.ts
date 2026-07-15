@@ -179,14 +179,44 @@ export function textToHtml(text: string): string {
  * Removes <style> and <script> blocks first to avoid injecting their
  * content into the output.
  */
+const NAMED_ENTITIES: Record<string, string> = {
+	amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+	mdash: "—", ndash: "–", hellip: "…", copy: "©",
+	reg: "®", trade: "™", rsquo: "’", lsquo: "‘",
+	rdquo: "”", ldquo: "“", middot: "·", bull: "•",
+	laquo: "«", raquo: "»", deg: "°", euro: "€", pound: "£",
+};
+
+/** Decode HTML entities (named + numeric dec/hex). Each &...; token is decoded
+ * exactly once, so double-encoded text (e.g. `&amp;lt;`) stays literal (`&lt;`). */
+export function decodeHtmlEntities(s: string): string {
+	return s.replace(/&(#x?[0-9a-f]+|[a-z0-9]+);/gi, (match, ent: string) => {
+		if (ent[0] === "#") {
+			const code = ent[1] === "x" || ent[1] === "X"
+				? parseInt(ent.slice(2), 16)
+				: parseInt(ent.slice(1), 10);
+			if (Number.isFinite(code) && code > 0 && code <= 0x10ffff) {
+				try { return String.fromCodePoint(code); } catch { return match; }
+			}
+			return match;
+		}
+		const named = NAMED_ENTITIES[ent.toLowerCase()];
+		return named !== undefined ? named : match;
+	});
+}
+
 export function stripHtmlToText(html: string): string {
 	if (!html) return "";
-	return html
+	// Strip script/style (including their bodies) and tags, THEN decode entities —
+	// otherwise `body_text` keeps literal `&amp;`/`&nbsp;`/etc., which breaks
+	// grepping codes/links (dogfood: Duoyu/Maggie — e.g. a URL `…?a=1&amp;b=2`
+	// extracts as `…&amp;b=2` = broken; `AT&amp;T-1` misses a grep for `AT&T-1`).
+	// Decode after tag-stripping so decoded `<`/`>` can't reintroduce markup.
+	const stripped = html
 		.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
 		.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-		.replace(/<[^>]+>/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
+		.replace(/<[^>]+>/g, " ");
+	return decodeHtmlEntities(stripped).replace(/\s+/g, " ").trim();
 }
 
 /**
