@@ -179,6 +179,28 @@ export function claimAllowedForHandle(localPart: string, callerHandle: string): 
 	return reservedHandleForLocalPart(lp) === callerHandle.toLowerCase();
 }
 
+export type ClaimAction = "create" | "adopt" | "idempotent" | "taken";
+/**
+ * Decide what a claim on an address should do, given the mailbox's current
+ * stored state. This is ONLY the ownership disposition — the namespace/anti-squat
+ * gate (`claimAllowedForHandle`) is enforced separately and must pass first.
+ * - not exists            → "create"  (fresh mailbox)
+ * - exists, owner == you   → "idempotent" (re-claim your own; no new key)
+ * - exists, owner == other → "taken" (409; belongs to someone else)
+ * - exists, no owner       → "adopt" (ownerless orphan, e.g. admin-provisioned
+ *   canonical `<handle>@` — take ownership instead of 409'ing)
+ */
+export function classifyClaim(
+	exists: boolean,
+	existingOwner: string | null | undefined,
+	owner: string,
+): ClaimAction {
+	if (!exists) return "create";
+	if (existingOwner && existingOwner === owner) return "idempotent";
+	if (existingOwner) return "taken";
+	return "adopt";
+}
+
 /**
  * Whether `callerHandle` may CREATE a mailbox with this local-part.
  * - Always allowed within the caller's own reserved prefix (`<caller>`/`<caller>-*`).

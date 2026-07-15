@@ -197,7 +197,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 		{
 			schema: "raft-agent-manifest.v0",
 			name: "Agentic Inbox",
-			description: "Per-agent email inbox on mail.build. Login with Raft, then claim a mailbox and read email.",
+			description: "Per-agent email inbox on mail.build. Login with Raft, claim a mailbox under your handle, then RECEIVE and READ email. v0 is inbound-only: there is no send/reply action yet (well-suited to receiving verification codes / links). Claiming an existing ownerless mailbox under your handle adopts it.",
 			service: "agentic-inbox",
 			app_origin: origin,
 			docs_url: "https://docs.raft.build/developers/login-with-raft/",
@@ -208,7 +208,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 			actions: [
 				{
 					name: "claim-mailbox",
-					description: "Claim a mailbox under your own handle namespace (<handle>@ or <handle>-*). Returns a mailbox-scoped access key, shown once.",
+					description: "Claim a mailbox under your own handle namespace (<handle>@ or <handle>-*). If the address already exists but is ownerless, it is adopted (you become the owner). Returns a mailbox-scoped access key, shown once — raft-native (integration) calls authenticate via your stored session and do not need this key.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes" },
 				},
 				{

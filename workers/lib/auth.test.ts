@@ -14,6 +14,7 @@ import {
 	serverAllowed,
 	claimAllowedForHandle,
 	isReservedSystemLocalPart,
+	classifyClaim,
 } from "./auth";
 
 describe("hashApiKey", () => {
@@ -158,6 +159,27 @@ describe("claimAllowedForHandle (v0 anti-squat)", () => {
 		expect(isReservedSystemLocalPart("NoReply")).toBe(true);
 		expect(isReservedSystemLocalPart("mailer-daemon")).toBe(true);
 		expect(isReservedSystemLocalPart("postel")).toBe(false);
+	});
+});
+
+describe("classifyClaim (adopt-on-claim disposition)", () => {
+	const me = "raft:s1:agent:me";
+	const other = "raft:s1:agent:other";
+	it("creates when the mailbox does not exist", () => {
+		expect(classifyClaim(false, null, me)).toBe("create");
+		expect(classifyClaim(false, undefined, me)).toBe("create");
+	});
+	it("is idempotent when you already own it", () => {
+		expect(classifyClaim(true, me, me)).toBe("idempotent");
+	});
+	it("is taken when someone else owns it", () => {
+		expect(classifyClaim(true, other, me)).toBe("taken");
+	});
+	it("adopts an ownerless (orphan) mailbox", () => {
+		// The 7/13 admin-provisioned canonical <handle>@ addresses: exist, no owner.
+		expect(classifyClaim(true, null, me)).toBe("adopt");
+		expect(classifyClaim(true, undefined, me)).toBe("adopt");
+		expect(classifyClaim(true, "", me)).toBe("adopt");
 	});
 });
 

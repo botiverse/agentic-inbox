@@ -17,7 +17,7 @@ import {
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
-import { canCreateMailbox, planForOwner, claimAllowedForHandle } from "./lib/auth";
+import { canCreateMailbox, planForOwner, claimAllowedForHandle, classifyClaim } from "./lib/auth";
 import { mintKey, mintToken, recordOwnedMailbox, countOwnedMailboxes, listOwnedMailboxes } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
@@ -124,7 +124,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 
 	// Claim requires an authenticated owner (agent scoped key or human session).
 	const owner = c.get("authOwner");
-	if (!owner) return c.json({ error: "Authentication required" }, 401);
+	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
 	const isAdmin = c.get("authIsAdmin") === true;
 
 	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
@@ -136,7 +136,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 		(allowedAddresses.length > 0 || allowedDomains.length > 0) &&
 		!isAddressAllowed(email, allowedAddresses, allowedDomains)
 	) {
-		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES or DOMAINS" }, 403);
+		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES or DOMAINS", code: "ADDRESS_NOT_ALLOWED" }, 403);
 	}
 
 	// Anti-squat: non-admin callers may only claim within their own handle
@@ -148,26 +148,52 @@ app.post("/api/v1/mailboxes", async (c) => {
 		if (!handle || !claimAllowedForHandle(localPart, handle)) {
 			return c.json({
 				error: "You can only claim mailboxes under your own handle (<handle>@ or <handle>-*); reserved system names are not allowed",
+				code: "NAMESPACE_FORBIDDEN",
 			}, 403);
 		}
 	}
 
-	// Tier quota: free = 1 mailbox, pro = 10 (pro = raft-server tier). Admin exempt.
+	// Existence check runs BEFORE the quota gate: re-claiming a mailbox you
+	// already own is idempotent (never blocked by quota), a taken address is
+	// rejected cleanly, and an ownerless mailbox is adopted rather than 409'd.
+	const key = `mailboxes/${email}.json`;
+	const existingObj = await c.env.BUCKET.get(key);
+	let existingSettings: (Record<string, unknown> & { owner?: string; fromName?: string }) | null = null;
+	if (existingObj) {
+		existingSettings = (await existingObj.json()) as Record<string, unknown> & { owner?: string; fromName?: string };
+		// Ownership disposition. Anti-squat namespace already enforced above, so an
+		// "adopt" here only ever covers the caller's own ownerless address (e.g. an
+		// admin-provisioned canonical <handle>@). (dogfood: Gogo/Box — 7/13 orphans.)
+		const action = classifyClaim(true, existingSettings.owner, owner);
+		if (action === "idempotent") {
+			// Already yours — no new key minted.
+			return c.json({ id: email, email, name: existingSettings.fromName || name, owner, settings: existingSettings }, 200);
+		}
+		if (action === "taken") {
+			return c.json({ error: "Mailbox already exists and is owned by another account", code: "MAILBOX_TAKEN" }, 409);
+		}
+		// action === "adopt": fall through.
+	}
+
+	// Tier quota (a fresh claim OR an orphan adoption both consume a slot). Admin exempt.
 	if (!isAdmin) {
 		const plan = planForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS));
 		const owned = await countOwnedMailboxes(c.env, owner);
 		if (!canCreateMailbox(plan, owned)) {
-			return c.json({ error: `Mailbox quota reached for plan '${plan}'`, plan, owned }, 403);
+			return c.json({ error: `Mailbox quota reached for plan '${plan}'`, code: "QUOTA_EXCEEDED", plan, owned }, 403);
 		}
 	}
 
-	const key = `mailboxes/${email}.json`;
-	if (await c.env.BUCKET.head(key)) return c.json({ error: "Mailbox already exists" }, 409);
+	const adopting = existingSettings !== null;
 	const defaultSettings = { fromName: name, forwarding: { enabled: false, email: "" }, signature: { enabled: false, text: "" }, autoReply: { enabled: false, subject: "", message: "" } };
-	// `owner` is the source of truth for mailbox ownership (API access is scoped to it).
-	const finalSettings = { ...defaultSettings, ...settings, owner };
+	// Adoption preserves the existing mailbox settings (and its stored mail);
+	// a fresh claim starts from defaults. Either way `owner` is stamped as the
+	// source of truth for API access scoping.
+	const finalSettings = adopting
+		? { ...(existingSettings as Record<string, unknown>), owner }
+		: { ...defaultSettings, ...settings, owner };
 	await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
-	await recordOwnedMailbox(c.env, owner, email, finalSettings.fromName || name);
+	await recordOwnedMailbox(c.env, owner, email, (finalSettings.fromName as string) || name);
 	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
 	await stub.getFolders();
 
@@ -176,7 +202,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 	const token = mintToken();
 	await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
 
-	return c.json({ id: email, email, name, owner, settings: finalSettings, key: token }, 201);
+	return c.json({ id: email, email, name: (finalSettings.fromName as string) || name, owner, settings: finalSettings, key: token, adopted: adopting || undefined }, adopting ? 200 : 201);
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
