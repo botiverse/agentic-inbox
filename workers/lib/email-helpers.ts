@@ -252,7 +252,10 @@ export async function getFullEmail(
 
 	const textBody = email.body ? stripHtmlToText(email.body) : "";
 	const bodyHtml = email.body && looksLikeHtml(email.body) ? email.body : null;
-	return { ...email, body_text: textBody, body_html: bodyHtml };
+	// getEmail's row has no snippet column (snippet is a list-query SUBSTR), so
+	// derive a plain-text preview here — get-email advertised snippet but returned
+	// none (dogfood: Duoyu).
+	return { ...email, body_text: textBody, body_html: bodyHtml, snippet: textBody.slice(0, 300) };
 }
 
 /**

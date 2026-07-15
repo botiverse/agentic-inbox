@@ -15,6 +15,7 @@ import {
 	buildThreadingHeaders,
 	listMailboxes,
 	getFullEmail,
+	stripHtmlToText,
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
@@ -272,17 +273,23 @@ app.get("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const sortDirection = c.req.query("sortDirection") as "ASC" | "DESC" | undefined;
 	const stub = c.var.mailboxStub;
 
+	// The DO computes snippet as SUBSTR(body,1,300) = raw HTML for HTML mail, so
+	// a UI/agent using it as a preview sees literal tags. Strip to plain text
+	// (dogfood: Duoyu). body_text elsewhere is already stripped.
+	const stripSnippets = <T extends { snippet?: string | null }>(rows: T[]): T[] =>
+		rows.map((e) => (e && e.snippet ? { ...e, snippet: stripHtmlToText(e.snippet) } : e));
+
 	if (threaded && folder) {
 		const emails = await (stub as any).getThreadedEmails({ folder, page, limit });
 		const totalCount = await (stub as any).countThreadedEmails(folder);
-		return c.json({ emails, totalCount });
+		return c.json({ emails: stripSnippets(emails), totalCount });
 	}
 	const emails = await stub.getEmails({ folder, thread_id, page, limit, sortColumn, sortDirection });
 	if (folder) {
 		const totalCount = await stub.countEmails({ folder, thread_id });
-		return c.json({ emails, totalCount });
+		return c.json({ emails: stripSnippets(emails), totalCount });
 	}
-	return c.json(emails);
+	return c.json(stripSnippets(emails));
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
