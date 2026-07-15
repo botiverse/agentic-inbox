@@ -277,7 +277,7 @@ app.get("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	// a UI/agent using it as a preview sees literal tags. Strip to plain text
 	// (dogfood: Duoyu). body_text elsewhere is already stripped.
 	const stripSnippets = <T extends { snippet?: string | null }>(rows: T[]): T[] =>
-		rows.map((e) => (e && e.snippet ? { ...e, snippet: stripHtmlToText(e.snippet) } : e));
+		rows.map((e) => (e && e.snippet ? { ...e, snippet: stripHtmlToText(e.snippet).slice(0, 300) } : e));
 
 	if (threaded && folder) {
 		const emails = await (stub as any).getThreadedEmails({ folder, page, limit });
