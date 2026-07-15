@@ -126,7 +126,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 		// Invalid JSON or schema violation (e.g. non-email `email`, missing `name`).
 		// Return a clean 400 instead of letting the error surface as a 500.
 		const detail = e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : "malformed request body";
-		return c.json({ error: `Invalid request body: ${detail}` }, 400);
+		return c.json({ error: `Invalid request body: ${detail}`, code: "BAD_REQUEST" }, 400);
 	}
 	const { name, settings, email: rawEmail } = parsed;
 	const email = rawEmail.toLowerCase();
@@ -239,7 +239,7 @@ app.put("/api/v1/mailboxes/:mailboxId", async (c) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const { settings } = (await c.req.json()) as { settings: Record<string, unknown> };
 	const key = `mailboxes/${mailboxId}.json`;
-	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
+	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	await c.env.BUCKET.put(key, JSON.stringify(settings));
 	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings });
 });
@@ -250,7 +250,7 @@ app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
 	// residue, so each trial permanently burned a mailbox against the quota).
 	const mailboxId = c.req.param("mailboxId")!;
 	const key = `mailboxes/${mailboxId}.json`;
-	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
+	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	await c.env.BUCKET.delete(key); // TODO: also delete DO data and R2 attachment blobs
 	const owner = c.get("authOwner");
 	if (owner) {
@@ -301,14 +301,14 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	try {
 		({ toStr, fromEmail, fromDomain } = validateSender(to, from, mailboxId));
 	} catch (e) {
-		if (e instanceof SenderValidationError) return c.json({ error: e.message }, 400);
+		if (e instanceof SenderValidationError) return c.json({ error: e.message, code: "BAD_REQUEST" }, 400);
 		throw e;
 	}
 
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 	const stub = c.var.mailboxStub;
 	const rateLimitError = await (stub as any).checkSendRateLimit();
-	if (rateLimitError) return c.json({ error: rateLimitError }, 429);
+	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
 	await stub.createEmail(Folders.SENT, {

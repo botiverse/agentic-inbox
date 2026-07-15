@@ -31,7 +31,7 @@ export type MailboxContext = {
 
 export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) => {
 	const rawId = c.req.param("mailboxId");
-	if (!rawId) return c.json({ error: "Mailbox ID required" }, 400);
+	if (!rawId) return c.json({ error: "Mailbox ID required", code: "BAD_REQUEST" }, 400);
 	const mailboxId = decodeURIComponent(rawId);
 
 	// Verify mailbox exists (GET so we can read its owner for authorization).
