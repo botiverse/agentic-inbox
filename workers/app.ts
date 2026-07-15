@@ -58,9 +58,14 @@ function wantsHtmlRedirect(request: Request): boolean {
 	return (request.headers.get("Accept") ?? "").includes("text/html");
 }
 
-/** Login-flow paths that must never be gated by the auth middleware. */
+/** Paths that must never be gated by the auth middleware: the login flow and the
+ * public agent-behavior manifest (the Raft integration CLI fetches it anonymously). */
 function isAuthExemptPath(pathname: string): boolean {
-	return pathname.startsWith("/auth/raft/") || pathname === "/auth/callback";
+	return (
+		pathname.startsWith("/auth/raft/") ||
+		pathname === "/auth/callback" ||
+		pathname === "/.well-known/raft-agent-manifest.json"
+	);
 }
 
 export { MailboxDO } from "./durableObject";
@@ -180,6 +185,52 @@ app.use("*", async (c, next) => {
 	// Authorization model note: once a teammate passes the shared Cloudflare Access
 	// policy, they can access all mailboxes in this app by design.
 	return next();
+});
+
+// ── Agent-behavior manifest (public; the Raft integration CLI fetches it) ─────
+// Describes the login-with-raft auth + the HTTP API actions agents can call.
+// Origins are derived from the request so the same route is valid on both the
+// workers.dev interim URL and mail.build.
+app.get("/.well-known/raft-agent-manifest.json", (c) => {
+	const origin = new URL(c.req.url).origin;
+	return c.json(
+		{
+			schema: "raft-agent-manifest.v0",
+			name: "Agentic Inbox",
+			description: "Per-agent email inbox on mail.build. Login with Raft, then claim a mailbox and read email.",
+			service: "agentic-inbox",
+			app_origin: origin,
+			docs_url: "https://docs.raft.build/developers/login-with-raft/",
+			execution: { mode: "http_api", base_url: origin },
+			auth: { type: "login_with_raft", login_url: `${origin}/auth/raft/login` },
+			// A cheap authenticated call that returns the caller's own mailboxes = context.
+			context_check: { url: `${origin}/api/v1/mailboxes`, method: "GET" },
+			actions: [
+				{
+					name: "claim-mailbox",
+					description: "Claim a mailbox under your own handle namespace (<handle>@ or <handle>-*). Returns a mailbox-scoped access key, shown once.",
+					endpoint: { method: "POST", path: "/api/v1/mailboxes" },
+				},
+				{
+					name: "list-mailboxes",
+					description: "List the mailboxes you own.",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes" },
+				},
+				{
+					name: "list-emails",
+					description: "List emails in one of your mailboxes (optionally by folder).",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails" },
+				},
+				{
+					name: "get-email",
+					description: "Read a single email in one of your mailboxes.",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails/{id}" },
+				},
+			],
+		},
+		200,
+		{ "Cache-Control": "public, max-age=300" },
+	);
 });
 
 // ── Login-with-Raft OAuth routes (exempt from the auth middleware above) ──────
