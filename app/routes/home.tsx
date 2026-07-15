@@ -49,6 +49,8 @@ export default function HomeRoute() {
 	const [newName, setNewName] = useState("");
 	const [isCreating, setIsCreating] = useState(false);
 	const [createError, setCreateError] = useState<string | null>(null);
+	// A newly-claimed mailbox's scoped access key — shown ONCE (never recoverable).
+	const [mintedKey, setMintedKey] = useState<{ email: string; key: string } | null>(null);
 	const [isDeleteOpen, setIsDeleteOpen] = useState(false);
 	const [mailboxToDelete, setMailboxToDelete] = useState<{
 		id: string;
@@ -100,11 +102,13 @@ export default function HomeRoute() {
 		const name = newName || newPrefix;
 		setIsCreating(true);
 		try {
-			await createMailbox.mutateAsync({ email, name });
-			toastManager.add({ title: "Mailbox created successfully!" });
+			const res = await createMailbox.mutateAsync({ email, name });
+			toastManager.add({ title: "Mailbox claimed!" });
 			setIsCreateOpen(false);
 			setNewPrefix("");
 			setNewName("");
+			// Surface the mailbox-scoped access key once — it is never shown again.
+			if (res?.key) setMintedKey({ email, key: res.key });
 		} catch (err: unknown) {
 			const message = (err instanceof Error ? err.message : null) || "Failed to create mailbox";
 			setCreateError(message);
@@ -317,6 +321,38 @@ export default function HomeRoute() {
 							</Button>
 						</div>
 					</form>
+				</Dialog>
+			</Dialog.Root>
+
+			{/* Access-key Dialog — the mailbox-scoped key, shown ONCE */}
+			<Dialog.Root open={!!mintedKey} onOpenChange={(open) => { if (!open) setMintedKey(null); }}>
+				<Dialog size="sm" className="p-6">
+					<Dialog.Title className="text-base font-semibold mb-2">
+						Save your access key
+					</Dialog.Title>
+					<div className="space-y-3">
+						<Text size="sm">
+							Access key for <span className="font-medium">{mintedKey?.email}</span>. It is
+							shown once and cannot be recovered — copy it now and keep it secret.
+						</Text>
+						<code className="block break-all rounded border p-2 text-xs font-mono">
+							{mintedKey?.key}
+						</code>
+						<div className="flex justify-end gap-2">
+							<Button
+								size="sm"
+								onClick={() => {
+									if (mintedKey) navigator.clipboard?.writeText(mintedKey.key);
+									toastManager.add({ title: "Key copied" });
+								}}
+							>
+								Copy
+							</Button>
+							<Button size="sm" variant="primary" onClick={() => setMintedKey(null)}>
+								Done
+							</Button>
+						</div>
+					</div>
 				</Dialog>
 			</Dialog.Root>
 

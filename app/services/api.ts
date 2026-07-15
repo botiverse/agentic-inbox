@@ -101,8 +101,9 @@ const api = {
 
 	// Mailboxes
 	listMailboxes: () => get<Mailbox[]>("/api/v1/mailboxes"),
+	// Claim returns the mailbox plus a mailbox-scoped access key (shown ONCE).
 	createMailbox: (email: string, name: string, settings?: unknown) =>
-		post<Mailbox>("/api/v1/mailboxes", { email, name, settings }),
+		post<Mailbox & { key?: string }>("/api/v1/mailboxes", { email, name, settings }),
 	getMailbox: (mailboxId: string) =>
 		get<Mailbox>(`/api/v1/mailboxes/${mailboxId}`),
 	updateMailbox: (mailboxId: string, settings: unknown) =>
