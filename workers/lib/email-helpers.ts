@@ -226,8 +226,22 @@ type MailboxThreadReaderStub = {
 };
 
 /**
+ * Whether a stored body actually contains HTML. The DO keeps a single `body`
+ * column that may hold either an HTML part or a plain-text part, so we detect
+ * real markup: a closing tag, or an opening tag of a known HTML element. A plain
+ * message that merely contains `<name>@host` must NOT count as HTML.
+ */
+export function looksLikeHtml(body: string): boolean {
+	return /<\/[a-z][a-z0-9]*\s*>|<(?:div|p|br|a|span|table|tr|td|th|thead|tbody|h[1-6]|strong|b|em|i|u|ul|ol|li|img|body|html|head|style|font|blockquote|hr|pre|code|small|center)\b/i.test(
+		body,
+	);
+}
+
+/**
  * Fetch a single email and return it with both HTML and plain-text body.
- * Returns null if the email is not found.
+ * `body_html` is null when the message has no HTML part (so callers can rely on
+ * `body_html === null` meaning "plain-text only"); `body_text` is always the
+ * HTML stripped to plain text. Returns null if the email is not found.
  */
 export async function getFullEmail(
 	stub: DurableObjectStub<MailboxDO>,
@@ -237,7 +251,8 @@ export async function getFullEmail(
 	if (!email) return null;
 
 	const textBody = email.body ? stripHtmlToText(email.body) : "";
-	return { ...email, body_text: textBody, body_html: email.body };
+	const bodyHtml = email.body && looksLikeHtml(email.body) ? email.body : null;
+	return { ...email, body_text: textBody, body_html: bodyHtml };
 }
 
 /**

@@ -403,16 +403,11 @@ app.get("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 	const email = await getFullEmail(c.var.mailboxStub, c.req.param("id")!);
 	if (!email) return c.json({ error: "Email not found", code: "NOT_FOUND" }, 404);
 	// Stable agent-facing contract: `body_text` (HTML stripped to plain) and
-	// `body_html` come from getFullEmail; add `from`/`to` aliases over the stored
-	// `sender`/`recipient`. Original fields (sender/recipient/body) are kept for
-	// the human UI. body_html is null when the message had no HTML part.
-	const e = email as typeof email & { sender?: string; recipient?: string; body?: string };
-	const withContract = {
-		...e,
-		from: e.sender,
-		to: e.recipient,
-		body_html: e.body ? e.body_html : null,
-	};
+	// `body_html` (null when the message has no HTML part) come from getFullEmail;
+	// add `from`/`to` aliases over the stored `sender`/`recipient`. Original fields
+	// (sender/recipient/body) are kept for the human UI.
+	const e = email as typeof email & { sender?: string; recipient?: string };
+	const withContract = { ...e, from: e.sender, to: e.recipient };
 	return c.json(withContract);
 });
 
