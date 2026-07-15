@@ -18,6 +18,9 @@
 		// on the pro tier (pro=10 mailboxes/agent, free=1). RAFT_OAUTH_* = Login with
 		// Raft Connected App; CLIENT_SECRET is set via `wrangler secret`, not here.
 		"PRO_SERVER_IDS": "",
+		// Login gated to these raft server_ids (v0: botiverse-only, tygg 2026-07-15).
+		// Empty = unrestricted. Enforce in the OAuth callback via serverAllowed().
+		"ALLOWED_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
 		"RAFT_OAUTH_CLIENT_ID": "",
 		"RAFT_OAUTH_ISSUER": "",
 		"EMAIL_ADDRESSES": [
@@ -171,7 +174,7 @@
 	"kv_namespaces": [
 		{
 			"binding": "AGENTIC_INBOX_KEYS",
-			"id": "REPLACE_WITH_KV_NAMESPACE_ID"
+			"id": "bbf03eefcab5455f9efb4496dc532a40"
 		}
 	],
 	"durable_objects": {
