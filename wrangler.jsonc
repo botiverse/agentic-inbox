@@ -17,7 +17,7 @@
 		// Per-agent auth (task #1). PRO_SERVER_IDS = comma-separated raft server_ids
 		// on the pro tier (pro=10 mailboxes/agent, free=1). RAFT_OAUTH_* = Login with
 		// Raft Connected App; CLIENT_SECRET is set via `wrangler secret`, not here.
-		"PRO_SERVER_IDS": "",
+		"PRO_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
 		// Login gated to these raft server_ids (v0: botiverse-only, tygg 2026-07-15).
 		// Empty = unrestricted. Enforce in the OAuth callback via serverAllowed().
 		"ALLOWED_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
