@@ -222,8 +222,10 @@ app.all("/auth/raft/callback", async (c) => {
 		const principal = validateRaftPrincipal(userinfo, config);
 		const ttl = Math.max(1, Math.min(typeof token.expires_in === "number" ? token.expires_in : SESSION_TTL_SECONDS, SESSION_TTL_SECONDS));
 		const sealed = await sealSession({ principal, expiresAt: Date.now() + ttl * 1000 }, c.env.RAFT_SESSION_SECRET as string);
-		c.header("Set-Cookie", sessionCookie(c.req.raw, sealed, ttl));
-		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw));
+		// Two Set-Cookie headers (session + clear login-state) MUST both survive —
+		// use append (c.header replaces by default, which would drop the session cookie).
+		c.header("Set-Cookie", sessionCookie(c.req.raw, sealed, ttl), { append: true });
+		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw), { append: true });
 		c.header("Cache-Control", "no-store");
 		// Browser: bounce to `next` (validated same-origin) or home. Agent: 204.
 		if (browserFlow) {
