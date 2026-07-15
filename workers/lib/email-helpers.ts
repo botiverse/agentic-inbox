@@ -281,6 +281,12 @@ export async function getFullEmail(
 	if (!email) return null;
 
 	const textBody = email.body ? stripHtmlToText(email.body) : "";
+	// SECURITY: body_html is the RAW stored body — it must NOT be entity-decoded.
+	// It is meant to be rendered; decoding a sender's escaped `&lt;script&gt;` back
+	// into a live `<script>` would inject XSS into the render path. Entity decoding
+	// (in stripHtmlToText) only ever runs on body_text/snippet, which are never
+	// rendered as HTML. Do not "simplify" this to reuse the decoded value.
+	// (dogfood: Duoyu.)
 	const bodyHtml = email.body && looksLikeHtml(email.body) ? email.body : null;
 	// getEmail's row has no snippet column (snippet is a list-query SUBSTR), so
 	// derive a plain-text preview here — get-email advertised snippet but returned

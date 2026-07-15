@@ -1,5 +1,23 @@
 import { describe, it, expect } from "vitest";
-import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities } from "./email-helpers";
+import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail } from "./email-helpers";
+
+describe("getFullEmail body_html is raw (XSS guard — dogfood: Duoyu)", () => {
+	// A sender safely-escaped `<script>` as display text. body_html is rendered,
+	// so it MUST stay escaped; body_text is never rendered, so decoding is fine.
+	const row = { id: "e1", body: "<p>&lt;script&gt;alert(1)&lt;/script&gt; hi</p>", read: 1, starred: 0 };
+	const stub = { getEmail: async () => row } as never;
+
+	it("keeps body_html entity-escaped (never decoded)", async () => {
+		const full = await getFullEmail(stub, "e1");
+		expect(full?.body_html).toBe("<p>&lt;script&gt;alert(1)&lt;/script&gt; hi</p>");
+		expect(full?.body_html).not.toContain("<script>");
+	});
+
+	it("decodes body_text (never rendered as HTML, so safe/grep-able)", async () => {
+		const full = await getFullEmail(stub, "e1");
+		expect(full?.body_text).toBe("<script>alert(1)</script> hi");
+	});
+});
 
 describe("stripHtmlToText entity decoding (dogfood: Duoyu/Maggie)", () => {
 	it("decodes &amp; in a URL so extracted links are usable", () => {
