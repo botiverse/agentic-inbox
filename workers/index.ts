@@ -103,7 +103,7 @@ app.get("/api/v1/mailboxes", async (c) => {
 	const owner = c.get("authOwner");
 	if (authScope && authScope !== "admin" && owner) {
 		const owned = await listOwnedMailboxes(c.env, owner);
-		return c.json(owned.map((id) => ({ id, email: id, name: id })));
+		return c.json(owned.map(({ email, name }) => ({ id: email, email, name })));
 	}
 	const allMailboxes = await listMailboxes(c.env.BUCKET);
 	return c.json(allMailboxes.map((m) => ({ ...m, name: m.id })));
@@ -167,7 +167,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// `owner` is the source of truth for mailbox ownership (API access is scoped to it).
 	const finalSettings = { ...defaultSettings, ...settings, owner };
 	await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
-	await recordOwnedMailbox(c.env, owner, email);
+	await recordOwnedMailbox(c.env, owner, email, finalSettings.fromName || name);
 	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
 	await stub.getFolders();
 
