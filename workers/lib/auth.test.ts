@@ -11,6 +11,7 @@ import {
 	canCreateMailbox,
 	serverIdFromOwner,
 	planForOwner,
+	serverAllowed,
 } from "./auth";
 
 describe("hashApiKey", () => {
@@ -131,5 +132,16 @@ describe("plan by raft-server tier", () => {
 		expect(planForOwner("raft:s-pro:agent:a", ["s-pro"])).toBe("pro");
 		expect(planForOwner("raft:s-free:agent:a", ["s-pro"])).toBe("free");
 		expect(planForOwner("raft:s-free:agent:a", [])).toBe("free");
+	});
+});
+
+describe("serverAllowed (botiverse-only login gate)", () => {
+	it("empty allowlist = unrestricted", () => {
+		expect(serverAllowed("s-any", [])).toBe(true);
+	});
+	it("gates login to allowed servers", () => {
+		expect(serverAllowed("s-botiverse", ["s-botiverse"])).toBe(true);
+		expect(serverAllowed("s-other", ["s-botiverse"])).toBe(false);
+		expect(serverAllowed(null, ["s-botiverse"])).toBe(false);
 	});
 });

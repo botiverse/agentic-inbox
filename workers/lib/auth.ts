@@ -125,6 +125,17 @@ export function serverIdFromOwner(owner: string | null | undefined): string | nu
 }
 
 /**
+ * Whether a raft server_id is allowed to sign in. When `allowedServerIds` is
+ * empty, all servers are allowed (unrestricted); otherwise login is gated to the
+ * listed servers (v0: botiverse-only — tygg 2026-07-15). Enforce in the OAuth
+ * callback after userinfo.
+ */
+export function serverAllowed(serverId: string | null | undefined, allowedServerIds: string[]): boolean {
+	if (allowedServerIds.length === 0) return true;
+	return !!serverId && allowedServerIds.includes(serverId);
+}
+
+/**
  * Derive a plan for an owner. Tiering is at the raft-server level: an owner
  * whose server_id is in `proServerIds` is `pro`, otherwise `free`.
  * (free=1 mailbox, pro=10 — tygg 2026-07-14.)
