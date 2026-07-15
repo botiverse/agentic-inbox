@@ -21,8 +21,13 @@
 		// Login gated to these raft server_ids (v0: botiverse-only, tygg 2026-07-15).
 		// Empty = unrestricted. Enforce in the OAuth callback via serverAllowed().
 		"ALLOWED_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
-		"RAFT_OAUTH_CLIENT_ID": "",
-		"RAFT_OAUTH_ISSUER": "",
+		// RAFT_OAUTH_CLIENT_KEY = the PUBLIC Connected-App client key (e.g. "agentic-inbox").
+		// Used for BOTH the setup client_id AND token-endpoint Basic auth — NEVER the
+		// internal app UUID (that mismatch was the slock-internal-dashboard PR #66 403).
+		// RAFT_OAUTH_CLIENT_SECRET + RAFT_SESSION_SECRET are wrangler secrets (not here).
+		"RAFT_OAUTH_CLIENT_KEY": "",
+		"RAFT_API_ORIGIN": "https://api.raft.build",
+		"RAFT_APP_ORIGIN": "https://app.raft.build",
 		"EMAIL_ADDRESSES": [
 			"gogo@mail.build",
 			"ray@mail.build",

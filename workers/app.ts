@@ -11,6 +11,57 @@ import { EmailMCP } from "./mcp";
 import { resolveKey } from "./lib/keyRegistry";
 import type { MailboxContext } from "./lib/mailbox";
 import type { Env } from "./types";
+import {
+	openSession,
+	sealSession,
+	sessionCookie,
+	newLoginState,
+	loginStateCookie,
+	readLoginState,
+	clearLoginStateCookie,
+	loginStatesMatch,
+} from "./lib/session";
+import {
+	type RaftOAuthConfig,
+	RaftAuthError,
+	exchangeAuthorizationCode,
+	exchangeAgentRequest,
+	fetchUserinfo,
+	validateRaftPrincipal,
+	ownerFromPrincipal,
+	raftSetupUrl,
+} from "./lib/raftAuth";
+
+const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8h
+const LOGIN_STATE_TTL_SECONDS = 600; // 10min
+
+/** True when Login-with-Raft is configured (mail.build): all four env pieces present. */
+function raftLoginConfigured(env: Env): boolean {
+	return Boolean(env.RAFT_API_ORIGIN && env.RAFT_APP_ORIGIN && env.RAFT_OAUTH_CLIENT_KEY && env.RAFT_OAUTH_CLIENT_SECRET && env.RAFT_SESSION_SECRET);
+}
+
+/** Read the Login-with-Raft OAuth config from env (call only when raftLoginConfigured). */
+function readRaftConfig(env: Env): RaftOAuthConfig {
+	return {
+		apiOrigin: (env.RAFT_API_ORIGIN ?? "").replace(/\/+$/, ""),
+		appOrigin: (env.RAFT_APP_ORIGIN ?? "").replace(/\/+$/, ""),
+		clientKey: env.RAFT_OAUTH_CLIENT_KEY ?? "",
+		clientSecret: env.RAFT_OAUTH_CLIENT_SECRET ?? "",
+		allowedServerIds: (env.ALLOWED_SERVER_IDS ?? "").split(/[,\s]+/).map((s) => s.trim()).filter(Boolean),
+	};
+}
+
+/** A request that should get an HTML redirect (browser nav) vs a JSON 401 (api/programmatic). */
+function wantsHtmlRedirect(request: Request): boolean {
+	const path = new URL(request.url).pathname;
+	if (path.startsWith("/api/") || path.startsWith("/mcp")) return false;
+	return (request.headers.get("Accept") ?? "").includes("text/html");
+}
+
+/** Login-flow paths that must never be gated by the auth middleware. */
+function isAuthExemptPath(pathname: string): boolean {
+	return pathname.startsWith("/auth/raft/") || pathname === "/auth/callback";
+}
 
 export { MailboxDO } from "./durableObject";
 export { EmailAgent } from "./agent";
@@ -52,9 +103,15 @@ app.use("*", async (c, next) => {
 		return next();
 	}
 
+	// Login-flow endpoints establish identity; they must never be auth-gated.
+	const path = new URL(c.req.url).pathname;
+	if (isAuthExemptPath(path)) {
+		return next();
+	}
+
 	const bearer = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "");
 
-	// Per-agent scoped key (KV registry): resolve owner + scope for authz.
+	// 1. Per-agent scoped key (Bearer) — programmatic agent access.
 	if (bearer) {
 		const key = await resolveKey(c.env, bearer);
 		if (key) {
@@ -65,9 +122,23 @@ app.use("*", async (c, next) => {
 		}
 	}
 
-	// Legacy global API_KEY — temporary admin fallback for already-distributed
-	// holders during cutover (feature seam; removed once all consumers hold KV
-	// keys). See notes/design-per-agent-auth.md resolution #2.
+	// 2. Login-with-Raft session (cookie) — human or agent signed in via OAuth.
+	//    The server allow-list (botiverse-only) was enforced ONCE at login in
+	//    validateRaftPrincipal; a sealed session is proof of that, so we trust the
+	//    owner here and do NOT re-check the server per request.
+	if (c.env.RAFT_SESSION_SECRET) {
+		const session = await openSession(c.req.raw, c.env.RAFT_SESSION_SECRET);
+		if (session) {
+			c.set("authOwner", ownerFromPrincipal(session.principal));
+			c.set("authScope", "account");
+			c.set("authIsAdmin", false);
+			if (session.principal.preferredUsername) c.set("authHandle", session.principal.preferredUsername);
+			return next();
+		}
+	}
+
+	// 3. Legacy global API_KEY — temporary admin fallback during cutover (removed
+	//    once all consumers hold scoped keys). See notes/design-per-agent-auth.md #2.
 	const apiKey = c.env.API_KEY;
 	if (apiKey && bearer === apiKey) {
 		c.set("authOwner", "local:admin");
@@ -76,35 +147,96 @@ app.use("*", async (c, next) => {
 		return next();
 	}
 
-	const { POLICY_AUD, TEAM_DOMAIN } = c.env;
+	// 4a. No identity, Login-with-Raft configured (mail.build): raft-login is the
+	//     gate. JSON 401 for api/programmatic; 302 to the login page for browsers.
+	if (raftLoginConfigured(c.env)) {
+		if (wantsHtmlRedirect(c.req.raw)) {
+			const nextParam = encodeURIComponent(path + new URL(c.req.url).search);
+			return c.redirect(`/auth/raft/login?next=${nextParam}`, 302);
+		}
+		return c.json({ error: "Authentication required" }, 401);
+	}
 
-	// Fail closed in production if Access is not configured.
+	// 4b. Legacy Cloudflare Access gate (workers.dev) — only active when configured
+	//     and raft-login is not. Inert on mail.build (POLICY_AUD/TEAM_DOMAIN unset).
+	const { POLICY_AUD, TEAM_DOMAIN } = c.env;
 	if (!POLICY_AUD || !TEAM_DOMAIN) {
 		return c.text(
-			"Cloudflare Access must be configured in production. Set POLICY_AUD and TEAM_DOMAIN.",
+			"Auth not configured: set Login-with-Raft (RAFT_*) or Cloudflare Access (POLICY_AUD/TEAM_DOMAIN).",
 			500,
 		);
 	}
-
 	const token = c.req.header("cf-access-jwt-assertion");
 	if (!token) {
 		return c.text("Missing required CF Access JWT", 403);
 	}
-
 	try {
 		const { issuer, certsUrl } = getAccessUrls(TEAM_DOMAIN);
 		const JWKS = createRemoteJWKSet(certsUrl);
-		await jwtVerify(token, JWKS, {
-			issuer,
-			audience: POLICY_AUD,
-		});
+		await jwtVerify(token, JWKS, { issuer, audience: POLICY_AUD });
 	} catch {
 		return c.text("Invalid or expired Access token", 403);
 	}
-
-	// Authorization model note: once a teammate passes the shared Cloudflare
-	// Access policy, they can access all mailboxes in this app by design.
+	// Authorization model note: once a teammate passes the shared Cloudflare Access
+	// policy, they can access all mailboxes in this app by design.
 	return next();
+});
+
+// ── Login-with-Raft OAuth routes (exempt from the auth middleware above) ──────
+// Browser (human) flow uses CSRF state + authorization_code; agent CLI flow uses
+// the agent_request grant with state forbidden. Both seal a session cookie that the
+// middleware maps to authOwner/authScope/authHandle.
+app.get("/auth/raft/login", async (c) => {
+	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
+	const config = readRaftConfig(c.env);
+	const state = newLoginState();
+	const callbackUrl = new URL("/auth/raft/callback", c.req.url).toString();
+	const location = raftSetupUrl(config, callbackUrl, state);
+	c.header("Set-Cookie", loginStateCookie(c.req.raw, state, LOGIN_STATE_TTL_SECONDS));
+	c.header("Cache-Control", "no-store");
+	return c.redirect(location, 302);
+});
+
+app.all("/auth/raft/callback", async (c) => {
+	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
+	const config = readRaftConfig(c.env);
+	const url = new URL(c.req.url);
+	const code = url.searchParams.get("code") ?? "";
+	const presentedState = url.searchParams.get("state");
+	const expectedState = readLoginState(c.req.raw);
+	// Browser flow iff a state is present on either side; agent flow otherwise.
+	const browserFlow = presentedState !== null || expectedState !== null;
+	try {
+		let token;
+		if (browserFlow) {
+			// CSRF: presented state must match the cookie state (constant-time).
+			if (!presentedState || !expectedState || !(await loginStatesMatch(presentedState, expectedState))) {
+				throw new RaftAuthError("RAFT_STATE_MISMATCH", "token_exchange_failed", 400);
+			}
+			token = await exchangeAuthorizationCode(config, code, url.toString().split("?")[0]);
+		} else {
+			// Agent flow: `code` carries the agent request id; state must be absent.
+			token = await exchangeAgentRequest(config, code);
+		}
+		const userinfo = await fetchUserinfo(config, token.access_token);
+		const principal = validateRaftPrincipal(userinfo, config);
+		const ttl = Math.max(1, Math.min(typeof token.expires_in === "number" ? token.expires_in : SESSION_TTL_SECONDS, SESSION_TTL_SECONDS));
+		const sealed = await sealSession({ principal, expiresAt: Date.now() + ttl * 1000 }, c.env.RAFT_SESSION_SECRET as string);
+		c.header("Set-Cookie", sessionCookie(c.req.raw, sealed, ttl));
+		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw));
+		c.header("Cache-Control", "no-store");
+		// Browser: bounce to `next` (validated same-origin) or home. Agent: 204.
+		if (browserFlow) {
+			const requested = url.searchParams.get("next") ?? "/";
+			const nextPath = requested.startsWith("/") && !requested.startsWith("//") ? requested : "/";
+			return c.redirect(nextPath, 302);
+		}
+		return c.body(null, 204);
+	} catch (err) {
+		const status = err instanceof RaftAuthError ? err.status : 403;
+		if (err instanceof RaftAuthError) console.warn("[raft-auth]", err.code, err.reason);
+		return c.json({ error: "Login could not be completed." }, status as 400 | 403 | 500, { "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" });
+	}
 });
 
 // MCP server endpoint — used by AI coding tools (ProtoAgent, Claude Code, Cursor, etc.)

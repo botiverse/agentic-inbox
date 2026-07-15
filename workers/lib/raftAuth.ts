@@ -20,6 +20,7 @@
  */
 
 import type { RaftPrincipal } from "./session";
+import { serverAllowed } from "./auth";
 
 export type AuthFailure =
 	| "missing_code"
@@ -91,8 +92,8 @@ async function postToken(config: RaftOAuthConfig, body: URLSearchParams, fetchIm
 	return token as TokenResponse;
 }
 
-/** Human browser flow: authorization_code grant. */
-export function exchangeAuthorizationCode(
+/** Human browser flow: authorization_code grant. (async so a bad-input throw surfaces as a rejection) */
+export async function exchangeAuthorizationCode(
 	config: RaftOAuthConfig,
 	code: string,
 	redirectUri: string,
@@ -103,7 +104,7 @@ export function exchangeAuthorizationCode(
 }
 
 /** Agent CLI flow: agent_request grant with request_id (the value arrives in the `code` query param). */
-export function exchangeAgentRequest(
+export async function exchangeAgentRequest(
 	config: RaftOAuthConfig,
 	requestId: string,
 	fetchImpl: typeof fetch = fetch,
@@ -137,8 +138,11 @@ export function validateRaftPrincipal(userinfo: unknown, config: RaftOAuthConfig
 	const clientId = str(userinfo, "client_id");
 	if (!sub || !type || !serverId || !clientId) throw new RaftAuthError("RAFT_USERINFO_MALFORMED", "userinfo_malformed");
 	if (type !== "agent" && type !== "human") throw new RaftAuthError("RAFT_PRINCIPAL_TYPE_INVALID", "principal_type_invalid");
-	// botiverse-only: server_id must be allow-listed.
-	if (!config.allowedServerIds.includes("*") && !config.allowedServerIds.includes(serverId)) {
+	// botiverse-only: server_id must be allow-listed. Login-time gate ONLY (once,
+	// here) — a sealed session is itself proof the server was allowed, so the
+	// per-request middleware trusts the owner and does NOT re-check. Uses the
+	// shared serverAllowed from lib/auth (single source of truth).
+	if (!serverAllowed(serverId, config.allowedServerIds as string[])) {
 		throw new RaftAuthError("RAFT_SERVER_NOT_ALLOWED", "server_not_allowed");
 	}
 	// The token was issued to OUR app; the presented client_id must match the key we authenticate as.

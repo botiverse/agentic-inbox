@@ -15,4 +15,8 @@ export interface Env extends Cloudflare.Env {
 	// Cloudflare.Env). AGENTIC_INBOX_KEYS (KV) also generated; keyRegistry accepts it
 	// structurally.
 	RAFT_OAUTH_CLIENT_SECRET?: string;
+	// RAFT_SESSION_SECRET is a wrangler secret (seals the login-with-raft session cookie).
+	// RAFT_OAUTH_CLIENT_KEY / RAFT_API_ORIGIN / RAFT_APP_ORIGIN come from wrangler `vars`
+	// (generated into Cloudflare.Env by `wrangler types`) — do NOT re-declare them here.
+	RAFT_SESSION_SECRET?: string;
 }

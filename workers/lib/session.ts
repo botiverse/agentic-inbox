@@ -44,10 +44,12 @@ function base64UrlEncode(bytes: Uint8Array): string {
 	return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-function base64UrlDecode(value: string): Uint8Array {
+function base64UrlDecode(value: string): Uint8Array<ArrayBuffer> {
 	const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
 	const binary = atob(padded);
-	const bytes = new Uint8Array(binary.length);
+	// Allocate over a concrete ArrayBuffer (not ArrayBufferLike) so the result is a
+	// valid BufferSource for crypto.subtle.decrypt (avoids the SharedArrayBuffer union).
+	const bytes = new Uint8Array(new ArrayBuffer(binary.length));
 	for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
 	return bytes;
 }
