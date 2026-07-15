@@ -8,6 +8,8 @@ import { jwtVerify, createRemoteJWKSet } from "jose";
 import { createRequestHandler } from "react-router";
 import { app as apiApp, receiveEmail } from "./index";
 import { EmailMCP } from "./mcp";
+import { resolveKey } from "./lib/keyRegistry";
+import type { MailboxContext } from "./lib/mailbox";
 import type { Env } from "./types";
 
 export { MailboxDO } from "./durableObject";
@@ -39,8 +41,10 @@ function getAccessUrls(teamDomain: string) {
 	return { issuer, certsUrl };
 }
 
-// Main app that wraps the API and adds React Router fallback
-const app = new Hono<{ Bindings: Env }>();
+// Main app that wraps the API and adds React Router fallback. Shares the
+// MailboxContext so the auth middleware can set authOwner/authScope for the
+// mounted API routes to read.
+const app = new Hono<MailboxContext>();
 // Cloudflare Access JWT validation middleware (production only)
 app.use("*", async (c, next) => {
 	// Skip validation in development
@@ -48,9 +52,27 @@ app.use("*", async (c, next) => {
 		return next();
 	}
 
-	// API Key authentication for programmatic access (agents)
+	const bearer = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "");
+
+	// Per-agent scoped key (KV registry): resolve owner + scope for authz.
+	if (bearer) {
+		const key = await resolveKey(c.env, bearer);
+		if (key) {
+			c.set("authOwner", key.owner);
+			c.set("authScope", key.scope);
+			c.set("authIsAdmin", key.scope === "admin");
+			return next();
+		}
+	}
+
+	// Legacy global API_KEY — temporary admin fallback for already-distributed
+	// holders during cutover (feature seam; removed once all consumers hold KV
+	// keys). See notes/design-per-agent-auth.md resolution #2.
 	const apiKey = c.env.API_KEY;
-	if (apiKey && c.req.header("Authorization") === `Bearer ${apiKey}`) {
+	if (apiKey && bearer === apiKey) {
+		c.set("authOwner", "local:admin");
+		c.set("authScope", "admin");
+		c.set("authIsAdmin", true);
 		return next();
 	}
 

@@ -9,4 +9,10 @@ export interface Env extends Cloudflare.Env {
 	// API_KEY is a secret (`wrangler secret`), which `wrangler types` does not
 	// generate — declare it here so programmatic auth in app.ts type-checks.
 	API_KEY?: string;
+	// Login-with-Raft OAuth: CLIENT_SECRET is a wrangler secret (not generated) —
+	// declare it here. Never expose it to the browser/prompt/logs. RAFT_OAUTH_CLIENT_ID
+	// / RAFT_OAUTH_ISSUER / PRO_SERVER_IDS come from wrangler `vars` (generated into
+	// Cloudflare.Env). AGENTIC_INBOX_KEYS (KV) also generated; keyRegistry accepts it
+	// structurally.
+	RAFT_OAUTH_CLIENT_SECRET?: string;
 }

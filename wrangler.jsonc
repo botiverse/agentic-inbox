@@ -14,6 +14,15 @@
 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
 		// The worker now fails closed outside local development if Access is not configured.
 		"DOMAINS": "mail.build",
+		// Per-agent auth (task #1). PRO_SERVER_IDS = comma-separated raft server_ids
+		// on the pro tier (pro=10 mailboxes/agent, free=1). RAFT_OAUTH_* = Login with
+		// Raft Connected App; CLIENT_SECRET is set via `wrangler secret`, not here.
+		"PRO_SERVER_IDS": "",
+		// Login gated to these raft server_ids (v0: botiverse-only, tygg 2026-07-15).
+		// Empty = unrestricted. Enforce in the OAuth callback via serverAllowed().
+		"ALLOWED_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
+		"RAFT_OAUTH_CLIENT_ID": "",
+		"RAFT_OAUTH_ISSUER": "",
 		"EMAIL_ADDRESSES": [
 			"gogo@mail.build",
 			"mobile-qa@mail.build",
@@ -165,6 +174,14 @@
 	"ai": {
 		"binding": "AI"
 	},
+	// Per-agent access-key registry (task #1). @Gogo: mint the namespace
+	// (`wrangler kv namespace create agentic-inbox-keys`) and fill the id.
+	"kv_namespaces": [
+		{
+			"binding": "AGENTIC_INBOX_KEYS",
+			"id": "bbf03eefcab5455f9efb4496dc532a40"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{
