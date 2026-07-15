@@ -38,7 +38,7 @@ export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) =
 	const key = `mailboxes/${mailboxId}.json`;
 	const obj = await c.env.BUCKET.get(key);
 	if (!obj) {
-		return c.json({ error: "Not found" }, 404);
+		return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	}
 
 	// Owner-scoped access: enforce for scoped-key callers. Legacy callers (CF

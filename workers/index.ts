@@ -230,7 +230,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const obj = await c.env.BUCKET.get(`mailboxes/${mailboxId}.json`);
-	if (!obj) return c.json({ error: "Not found" }, 404);
+	if (!obj) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings: await obj.json() });
 });
 
@@ -331,6 +331,58 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	return c.json({ id: messageId, status: "sent" }, 202);
 });
 
+// Internal-only send (v0): deliver from an owned mailbox to another mailbox on a
+// configured domain by writing straight into the recipient's inbox — NO external
+// SMTP egress, so no SPF/DKIM/DMARC/open-relay/spoofing surface. Owner-scoped
+// (requireMailbox gates the FROM mailbox); the recipient mailbox must already
+// exist. External outbound is a separate v0.1 with domain-auth + abuse controls.
+app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
+	const from = c.req.param("mailboxId")!.toLowerCase();
+	let reqBody: { to?: string; subject?: string; text?: string; html?: string };
+	try {
+		reqBody = (await c.req.json()) as typeof reqBody;
+	} catch {
+		return c.json({ error: "Invalid JSON body", code: "BAD_REQUEST" }, 400);
+	}
+	const to = (reqBody.to || "").trim().toLowerCase();
+	if (!to || !/^[^@\s]+@[^@\s]+$/.test(to)) {
+		return c.json({ error: "A valid `to` address is required", code: "BAD_REQUEST" }, 400);
+	}
+	// Internal-only: the recipient must be on a configured domain / allowlist.
+	if (!isAddressAllowed(to, (c.env.EMAIL_ADDRESSES ?? []) as string[], parseDomains(c.env.DOMAINS))) {
+		return c.json({ error: "v0 send is internal-only: the recipient must be a mailbox on a configured domain (e.g. @mail.build)", code: "SEND_EXTERNAL_UNSUPPORTED" }, 400);
+	}
+	// Recipient mailbox must already exist (internal delivery has no MX fallback).
+	if (!(await c.env.BUCKET.head(`mailboxes/${to}.json`))) {
+		return c.json({ error: "Recipient mailbox does not exist", code: "NOT_FOUND" }, 404);
+	}
+	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit();
+	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
+
+	const subject = (reqBody.subject || "").toString();
+	const content = (reqBody.html || reqBody.text || "").toString();
+	const fromDomain = from.split("@")[1] || "mail.build";
+	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
+	const now = new Date().toISOString();
+	const common = {
+		subject, sender: from, recipient: to, cc: null, bcc: null, date: now,
+		body: content, in_reply_to: null, email_references: null,
+		thread_id: messageId, message_id: outgoingMessageId,
+		raw_headers: JSON.stringify([
+			{ key: "from", value: from }, { key: "to", value: to },
+			{ key: "subject", value: subject }, { key: "date", value: now },
+			{ key: "message-id", value: `<${outgoingMessageId}>` },
+			{ key: "x-agentic-inbox-delivery", value: "internal" },
+		]),
+	};
+	// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
+	const toStub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(to));
+	await toStub.createEmail(Folders.INBOX, { id: messageId, ...common }, []);
+	await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
+
+	return c.json({ id: messageId, status: "sent", delivery: "internal" }, 202);
+});
+
 app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const { to, cc, bcc, subject, body, in_reply_to, thread_id, draft_id } = DraftBody.parse(await c.req.json());
@@ -349,7 +401,7 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 
 app.get("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 	const email = await getFullEmail(c.var.mailboxStub, c.req.param("id")!);
-	if (!email) return c.json({ error: "Email not found" }, 404);
+	if (!email) return c.json({ error: "Email not found", code: "NOT_FOUND" }, 404);
 	// Stable agent-facing contract: `body_text` (HTML stripped to plain) and
 	// `body_html` come from getFullEmail; add `from`/`to` aliases over the stored
 	// `sender`/`recipient`. Original fields (sender/recipient/body) are kept for

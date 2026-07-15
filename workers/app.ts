@@ -232,6 +232,11 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 					description: "Release (delete) a mailbox you own, freeing the quota slot so you can claim another. Use this to clean up throwaway / verification mailboxes.",
 					endpoint: { method: "DELETE", path: "/api/v1/mailboxes/{mailboxId}" },
 				},
+				{
+					name: "send-mail",
+					description: "Send a message FROM a mailbox you own TO another mailbox on this service (v0 is internal-only — agent-to-agent within the configured domain; the recipient mailbox must already exist). Body: {to, subject, text, html?}. No external/outbound delivery yet.",
+					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/send" },
+				},
 			],
 		},
 		200,
