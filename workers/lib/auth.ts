@@ -154,6 +154,31 @@ export function canCreateMailbox(
 	return currentOwnedCount < maxMailboxesForPlan(plan, limits);
 }
 
+// System local-parts that NO agent may claim (RFC 2142 + common infra names).
+export const RESERVED_SYSTEM_LOCALPARTS = new Set([
+	"admin", "administrator", "root", "postmaster", "hostmaster", "webmaster",
+	"noreply", "no-reply", "mailer-daemon", "daemon", "abuse", "security",
+	"support", "info", "help", "billing", "sales",
+]);
+
+export function isReservedSystemLocalPart(localPart: string): boolean {
+	return RESERVED_SYSTEM_LOCALPARTS.has(localPart.toLowerCase());
+}
+
+/**
+ * v0 claim rule (anti-squat): an authenticated caller may claim a mailbox only
+ * within its OWN handle namespace (`<handle>@` or `<handle>-*`) and never a
+ * reserved system name. Prevents agent A from squatting B's identity address.
+ * `callerHandle` is the caller's raft `preferred_username`.
+ * (Free / shared names outside your namespace are a fast-follow.)
+ */
+export function claimAllowedForHandle(localPart: string, callerHandle: string): boolean {
+	const lp = localPart.toLowerCase();
+	if (!callerHandle) return false;
+	if (isReservedSystemLocalPart(lp)) return false;
+	return reservedHandleForLocalPart(lp) === callerHandle.toLowerCase();
+}
+
 /**
  * Whether `callerHandle` may CREATE a mailbox with this local-part.
  * - Always allowed within the caller's own reserved prefix (`<caller>`/`<caller>-*`).

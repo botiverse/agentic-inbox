@@ -17,7 +17,7 @@ import {
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
-import { canCreateMailbox, planForOwner } from "./lib/auth";
+import { canCreateMailbox, planForOwner, claimAllowedForHandle } from "./lib/auth";
 import { mintKey, mintToken, recordOwnedMailbox, countOwnedMailboxes, listOwnedMailboxes } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
@@ -137,6 +137,19 @@ app.post("/api/v1/mailboxes", async (c) => {
 		!isAddressAllowed(email, allowedAddresses, allowedDomains)
 	) {
 		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES or DOMAINS" }, 403);
+	}
+
+	// Anti-squat: non-admin callers may only claim within their own handle
+	// namespace (`<handle>@` / `<handle>-*`), never a reserved system name.
+	// Prevents agent A from claiming B's identity address.
+	if (!isAdmin) {
+		const handle = c.get("authHandle");
+		const localPart = email.split("@")[0] ?? "";
+		if (!handle || !claimAllowedForHandle(localPart, handle)) {
+			return c.json({
+				error: "You can only claim mailboxes under your own handle (<handle>@ or <handle>-*); reserved system names are not allowed",
+			}, 403);
+		}
 	}
 
 	// Tier quota: free = 1 mailbox, pro = 10 (pro = raft-server tier). Admin exempt.

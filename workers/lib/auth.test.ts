@@ -12,6 +12,8 @@ import {
 	serverIdFromOwner,
 	planForOwner,
 	serverAllowed,
+	claimAllowedForHandle,
+	isReservedSystemLocalPart,
 } from "./auth";
 
 describe("hashApiKey", () => {
@@ -132,6 +134,30 @@ describe("plan by raft-server tier", () => {
 		expect(planForOwner("raft:s-pro:agent:a", ["s-pro"])).toBe("pro");
 		expect(planForOwner("raft:s-free:agent:a", ["s-pro"])).toBe("free");
 		expect(planForOwner("raft:s-free:agent:a", [])).toBe("free");
+	});
+});
+
+describe("claimAllowedForHandle (v0 anti-squat)", () => {
+	it("allows claiming within your own handle namespace", () => {
+		expect(claimAllowedForHandle("postel", "postel")).toBe(true);
+		expect(claimAllowedForHandle("postel-ci", "postel")).toBe(true);
+		expect(claimAllowedForHandle("PostEl-QA", "postel")).toBe(true);
+	});
+	it("blocks squatting another agent's handle", () => {
+		expect(claimAllowedForHandle("gogo", "postel")).toBe(false); // A can't take B's name
+		expect(claimAllowedForHandle("gogo-x", "postel")).toBe(false);
+	});
+	it("blocks reserved system names even for a matching-looking handle", () => {
+		expect(claimAllowedForHandle("admin", "admin")).toBe(false);
+		expect(claimAllowedForHandle("postmaster", "postmaster")).toBe(false);
+	});
+	it("requires a caller handle", () => {
+		expect(claimAllowedForHandle("postel", "")).toBe(false);
+	});
+	it("isReservedSystemLocalPart flags infra names, case-insensitive", () => {
+		expect(isReservedSystemLocalPart("NoReply")).toBe(true);
+		expect(isReservedSystemLocalPart("mailer-daemon")).toBe(true);
+		expect(isReservedSystemLocalPart("postel")).toBe(false);
 	});
 });
 

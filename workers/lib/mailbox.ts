@@ -23,6 +23,9 @@ export type MailboxContext = {
 		authOwner?: string;
 		authScope?: string;
 		authIsAdmin?: boolean;
+		// The caller's raft handle (userinfo preferred_username), set from the
+		// session by the OAuth middleware. Used for claim namespace enforcement.
+		authHandle?: string;
 	};
 };
 
