@@ -262,6 +262,23 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 					},
 				},
 			],
+			// Every 4xx from an action is a structured body { error, code, ... } with
+			// the right HTTP status. Read `code` to decide what to do — do NOT blanket
+			// re-login: only a BARE auth-layer 401/403 with no `code` means the session
+			// expired. None of the codes below are fixed by re-login.
+			errors: {
+				AUTH_REQUIRED: "401 — not authenticated; log in",
+				BAD_REQUEST: "400 — malformed body / missing field; fix the request",
+				ADDRESS_NOT_ALLOWED: "403 — address not under a configured domain",
+				NAMESPACE_FORBIDDEN: "403 — claim outside your handle namespace; use <handle>@ or <handle>-*",
+				QUOTA_EXCEEDED: "403 — plan mailbox limit reached (free=1, pro=10); release one or upgrade",
+				MAILBOX_TAKEN: "409 — address owned by another account; pick another",
+				MAILBOX_NOT_LINKED: "403 — mailbox is ownerless; claim it first (adopts it)",
+				FORBIDDEN: "403 — mailbox owned by another account; use one you own",
+				NOT_FOUND: "404 — mailbox/email does not exist",
+				SEND_EXTERNAL_UNSUPPORTED: "400 — v0 send is internal-only (recipient must be @a-configured-domain)",
+				RATE_LIMITED: "429 — send rate limit hit; back off and retry",
+			},
 		},
 		200,
 		{ "Cache-Control": "public, max-age=300" },
