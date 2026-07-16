@@ -155,6 +155,17 @@ describe("claimAllowedForHandle (v0 anti-squat)", () => {
 	it("requires a caller handle", () => {
 		expect(claimAllowedForHandle("postel", "")).toBe(false);
 	});
+	it("allows a HYPHENATED handle to claim its own namespace (dogfood: Gogo, human-side)", () => {
+		// Regression: the old fold-to-first-segment check made any hyphenated handle
+		// unable to claim ANYTHING (gogo-signup-dogfood folded to gogo != full handle).
+		expect(claimAllowedForHandle("gogo-signup-dogfood", "gogo-signup-dogfood")).toBe(true);
+		expect(claimAllowedForHandle("gogo-signup-dogfood-notes", "gogo-signup-dogfood")).toBe(true);
+		expect(claimAllowedForHandle("Gogo-Signup-Dogfood", "gogo-signup-dogfood")).toBe(true);
+	});
+	it("a hyphenated handle still can't claim a different (shorter) handle's bare name", () => {
+		expect(claimAllowedForHandle("gogo", "gogo-signup-dogfood")).toBe(false);
+		expect(claimAllowedForHandle("gogo-ci", "gogo-signup-dogfood")).toBe(false);
+	});
 	it("isReservedSystemLocalPart flags infra names, case-insensitive", () => {
 		expect(isReservedSystemLocalPart("NoReply")).toBe(true);
 		expect(isReservedSystemLocalPart("mailer-daemon")).toBe(true);

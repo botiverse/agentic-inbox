@@ -174,9 +174,16 @@ export function isReservedSystemLocalPart(localPart: string): boolean {
  */
 export function claimAllowedForHandle(localPart: string, callerHandle: string): boolean {
 	const lp = localPart.toLowerCase();
-	if (!callerHandle) return false;
+	const ch = callerHandle.toLowerCase();
+	if (!ch) return false;
 	if (isReservedSystemLocalPart(lp)) return false;
-	return reservedHandleForLocalPart(lp) === callerHandle.toLowerCase();
+	// Anchor to the caller's FULL handle: the claimable namespace is `<handle>@`
+	// and `<handle>-*@`. The old check folded lp to its first hyphen-segment
+	// (reservedHandleForLocalPart) and compared that to the whole handle — so any
+	// caller whose handle ITSELF contains a hyphen (e.g. `gogo-signup-dogfood`,
+	// folded to `gogo`) could never match and could claim NOTHING. Agents never hit
+	// it (agent handles have no hyphen); found only on the human side (dogfood: Gogo).
+	return lp === ch || lp.startsWith(`${ch}-`);
 }
 
 export type ClaimAction = "create" | "adopt" | "idempotent" | "taken";
