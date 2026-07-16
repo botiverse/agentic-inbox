@@ -14,7 +14,7 @@ import {
 } from "@cloudflare/kumo";
 import { EnvelopeIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { Link as RouterLink } from "react-router";
 import api from "~/services/api";
 import {
@@ -30,7 +30,7 @@ export function meta() {
 
 export default function HomeRoute() {
 	const toastManager = useKumoToastManager();
-	const { data: mailboxes = [], refetch: refetchMailboxes, isFetched: mailboxesFetched } = useMailboxes();
+	const { data: mailboxes = [], isFetched: mailboxesFetched } = useMailboxes();
 	const createMailbox = useCreateMailbox();
 	const deleteMailbox = useDeleteMailbox();
 
@@ -41,7 +41,6 @@ export default function HomeRoute() {
 	});
 
 	const domains = configData?.domains ?? [];
-	const emailAddresses = configData?.emailAddresses ?? [];
 
 	const [isCreateOpen, setIsCreateOpen] = useState(false);
 	const [newPrefix, setNewPrefix] = useState("");
@@ -64,32 +63,6 @@ export default function HomeRoute() {
 			setSelectedDomain(domains[0]);
 		}
 	}, [domains, selectedDomain]);
-
-	// Auto-create mailboxes from config (run once when both data sources are ready)
-	const autoCreateDone = useRef(false);
-	useEffect(() => {
-		if (autoCreateDone.current) return;
-		if (emailAddresses.length === 0 || !mailboxesFetched) return;
-		const existingEmails = new Set(
-			mailboxes.map((m) => m.email.toLowerCase()),
-		);
-		const toCreate = emailAddresses.filter(
-			(addr) => !existingEmails.has(addr.toLowerCase()),
-		);
-		if (toCreate.length === 0) {
-			autoCreateDone.current = true;
-			return;
-		}
-		autoCreateDone.current = true;
-		let cancelled = false;
-		Promise.all(
-			toCreate.map((addr) => {
-				const localPart = addr.split("@")[0] || addr;
-				return api.createMailbox(addr, localPart).catch(() => {});
-			}),
-		).then(() => { if (!cancelled) refetchMailboxes(); });
-		return () => { cancelled = true; };
-	}, [emailAddresses, mailboxes, refetchMailboxes]);
 
 	const handleCreate = async (e: FormEvent) => {
 		e.preventDefault();
@@ -132,16 +105,12 @@ export default function HomeRoute() {
 		}
 	};
 
-	const isConfigured = emailAddresses.length > 0;
-	const accounts = isConfigured
-		? emailAddresses.map((addr) => ({
-				id: addr,
-				email: addr,
-				name: addr.split("@")[0] || addr,
-			}))
-		: mailboxes;
-
-	const isLoading = !configData;
+	// Show only the mailboxes THIS user owns (per-owner model). The old build
+	// rendered the whole EMAIL_ADDRESSES config directory as the list AND
+	// auto-claimed it — that leaked everyone's addresses to every user and hid the
+	// claim button. (dogfood: Artea — human saw gogo@/ray@/… and no way to claim.)
+	const accounts = mailboxes;
+	const isLoading = !mailboxesFetched;
 
 	return (
 		<div className="min-h-screen bg-kumo-recessed">
@@ -149,15 +118,13 @@ export default function HomeRoute() {
 				<div className="mb-8">
 					<div className="flex items-center justify-between">
 						<h1 className="text-2xl font-bold text-kumo-default">Mailboxes</h1>
-						{!isConfigured && (
-							<Button
-								variant="primary"
-								icon={<PlusIcon size={16} />}
-								onClick={() => setIsCreateOpen(true)}
-							>
-								New Mailbox
-							</Button>
-						)}
+						<Button
+							variant="primary"
+							icon={<PlusIcon size={16} />}
+							onClick={() => setIsCreateOpen(true)}
+						>
+							New Mailbox
+						</Button>
 					</div>
 					{domains.length > 0 && (
 						<p className="text-sm text-kumo-subtle mt-1">
@@ -191,24 +158,22 @@ export default function HomeRoute() {
 										{account.email}
 									</div>
 								</div>
-								{!isConfigured && (
-									<Button
-										variant="ghost"
-										size="sm"
-										shape="square"
-										icon={<TrashIcon size={16} />}
-										aria-label={`Delete mailbox ${account.email}`}
-										onClick={(e) => {
-											e.preventDefault();
-											e.stopPropagation();
-											setMailboxToDelete({
-												id: account.id,
-												email: account.email,
-											});
-											setIsDeleteOpen(true);
-										}}
-									/>
-								)}
+								<Button
+									variant="ghost"
+									size="sm"
+									shape="square"
+									icon={<TrashIcon size={16} />}
+									aria-label={`Delete mailbox ${account.email}`}
+									onClick={(e) => {
+										e.preventDefault();
+										e.stopPropagation();
+										setMailboxToDelete({
+											id: account.id,
+											email: account.email,
+										});
+										setIsDeleteOpen(true);
+									}}
+								/>
 							</RouterLink>
 						))}
 					</div>
@@ -226,19 +191,16 @@ export default function HomeRoute() {
 								No mailboxes yet
 							</h3>
 							<p className="text-sm text-kumo-subtle max-w-sm mb-5">
-								{isConfigured
-									? "Your email routing is configured but no mailboxes have been created yet. They will appear here automatically."
-									: "Create a mailbox to start sending and receiving emails with your domain."}
+								Claim a mailbox under your handle to start sending and
+								receiving email — e.g. <code>you@{selectedDomain || "mail.build"}</code>.
 							</p>
-							{!isConfigured && (
-								<Button
-									variant="primary"
-									icon={<PlusIcon size={16} />}
-									onClick={() => setIsCreateOpen(true)}
-								>
-									Create Mailbox
-								</Button>
-							)}
+							<Button
+								variant="primary"
+								icon={<PlusIcon size={16} />}
+								onClick={() => setIsCreateOpen(true)}
+							>
+								Claim a mailbox
+							</Button>
 						</div>
 					</div>
 				)}

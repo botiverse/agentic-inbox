@@ -104,10 +104,14 @@ app.get("/api/v1/config", (c) => {
 // -- Mailboxes ------------------------------------------------------
 
 app.get("/api/v1/mailboxes", async (c) => {
-	// Scoped-key callers see only their own mailboxes; admin / legacy sees all.
-	const authScope = c.get("authScope");
 	const owner = c.get("authOwner");
-	if (authScope && authScope !== "admin" && owner) {
+	const isAdmin = c.get("authIsAdmin") === true;
+	// FAIL CLOSED: only a verified admin sees every mailbox. Anyone else sees ONLY
+	// their own (empty if none). Previously the fallback returned ALL mailboxes for
+	// any request without a clean owner — a fail-open leak that would expose the
+	// whole directory if the identity ever failed to attach.
+	if (!isAdmin) {
+		if (!owner) return c.json([]);
 		// Strongly-consistent list from the per-owner DO (no kv.list lag, so a
 		// just-claimed mailbox shows immediately — dogfood: Box).
 		const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
