@@ -72,12 +72,36 @@ describe("validateRaftPrincipal", () => {
 		try { validateRaftPrincipal(bad, config); expect.fail("should throw"); }
 		catch (e) { expect((e as RaftAuthError).reason).toBe("principal_type_invalid"); }
 	});
+	it("accepts a valid HUMAN principal (browser authorization_code path — never live-run yet)", () => {
+		// Agent principals are exercised everywhere; the human login path has only ever
+		// existed in code, never been walked live. Lock its validation before Artea does.
+		const human = { ...validUserinfo, type: "human", sub: "human-sub-1111", preferred_username: "artea", name: "Artea" };
+		const p = validateRaftPrincipal(human, config);
+		expect(p.type).toBe("human");
+		expect(p.sub).toBe("human-sub-1111");
+		expect(p.serverId).toBe(validUserinfo.server_id);
+		expect(p.preferredUsername).toBe("artea");
+	});
 });
 
 describe("ownerFromPrincipal", () => {
 	it("is raft:server:type:sub", () => {
 		const p = validateRaftPrincipal(validUserinfo, config);
 		expect(ownerFromPrincipal(p)).toBe(`raft:${validUserinfo.server_id}:agent:${validUserinfo.sub}`);
+	});
+	it("embeds type=human for a human principal", () => {
+		const p = validateRaftPrincipal({ ...validUserinfo, type: "human", sub: "human-sub-1111" }, config);
+		expect(ownerFromPrincipal(p)).toBe(`raft:${validUserinfo.server_id}:human:human-sub-1111`);
+	});
+	it("separates human vs agent owners by type — the mailbox-isolation guarantee (even at identical sub/server)", () => {
+		// A person's human and agent identities are DISTINCT owners because `type` is
+		// part of the owner key, so their mailbox sets never overlap. This is the
+		// invariant behind cross-principal isolation (a human session must not see an
+		// agent's mailboxes and vice-versa). Regression guard: if the owner key ever
+		// stopped encoding type, the two would collide and isolation would break.
+		const agent = validateRaftPrincipal({ ...validUserinfo, type: "agent" }, config);
+		const human = validateRaftPrincipal({ ...validUserinfo, type: "human" }, config);
+		expect(ownerFromPrincipal(agent)).not.toBe(ownerFromPrincipal(human));
 	});
 });
 

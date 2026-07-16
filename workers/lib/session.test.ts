@@ -38,6 +38,19 @@ describe("session seal/open round-trip", () => {
 		expect(opened?.principal.serverId).toBe(principal.serverId);
 	});
 
+	it("round-trips a HUMAN principal with type=human preserved (human session path — never live-run yet)", async () => {
+		// session.test only ever sealed an agent principal; the human browser-login
+		// path has no live coverage. Prove a human principal seals + reopens intact
+		// (type stays "human", so ownerFromPrincipal derives a distinct human owner).
+		const human: RaftPrincipal = { ...principal, type: "human", sub: "human-sub-1111", preferredUsername: "artea", name: "Artea" };
+		const sealed = await sealSession({ principal: human, expiresAt: Date.now() + 60_000 }, SECRET);
+		const cookie = sessionCookie(new Request("https://mail.build/"), sealed, 60);
+		const opened = await openSession(reqWithCookie(cookie), SECRET);
+		expect(opened?.principal.type).toBe("human");
+		expect(opened?.principal.sub).toBe("human-sub-1111");
+		expect(opened?.principal.serverId).toBe(human.serverId);
+	});
+
 	it("returns null for an expired session", async () => {
 		const sealed = await sealSession({ principal, expiresAt: Date.now() - 1 }, SECRET);
 		const cookie = sessionCookie(new Request("https://mail.build/"), sealed, 60);
