@@ -11,6 +11,7 @@ import { EmailMCP } from "./mcp";
 import { resolveKey } from "./lib/keyRegistry";
 import type { MailboxContext } from "./lib/mailbox";
 import type { Env } from "./types";
+import { BUILD_SHA, BUILD_TIME } from "./version";
 import {
 	openSession,
 	sealSession,
@@ -64,7 +65,8 @@ function isAuthExemptPath(pathname: string): boolean {
 	return (
 		pathname.startsWith("/auth/raft/") ||
 		pathname === "/auth/callback" ||
-		pathname === "/.well-known/raft-agent-manifest.json"
+		pathname === "/.well-known/raft-agent-manifest.json" ||
+		pathname === "/health"
 	);
 }
 
@@ -102,6 +104,18 @@ function getAccessUrls(teamDomain: string) {
 // MailboxContext so the auth middleware can set authOwner/authScope for the
 // mounted API routes to read.
 const app = new Hono<MailboxContext>();
+// Stamp the deployed build SHA on every response so the running version is
+// observable (header is grep-friendly for monitoring; /health exposes it as JSON).
+// A bare `wrangler deploy` that shipped a stale bundle would show the old SHA here.
+app.use("*", async (c, next) => {
+	await next();
+	c.header("X-Agentic-Inbox-Version", BUILD_SHA);
+});
+// Liveness + version probe (public, auth-exempt) — monitoring asserts the running
+// `version` equals the expected deployed SHA, catching stale deploys automatically.
+app.get("/health", (c) =>
+	c.json({ status: "ok", version: BUILD_SHA, build_time: BUILD_TIME }),
+);
 // Cloudflare Access JWT validation middleware (production only)
 app.use("*", async (c, next) => {
 	// Skip validation in development
