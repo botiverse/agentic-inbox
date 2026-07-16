@@ -293,8 +293,16 @@ app.get("/auth/raft/login", async (c) => {
 	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
 	const config = readRaftConfig(c.env);
 	const state = newLoginState();
-	const callbackUrl = new URL("/auth/raft/callback", c.req.url).toString();
-	const location = raftSetupUrl(config, callbackUrl, state);
+	const callbackUrl = new URL("/auth/raft/callback", c.req.url);
+	// Force https so the callback matches the registered redirect (registered as
+	// https://). A request that arrived over http — e.g. a user typing
+	// `http://mail.build` — would otherwise build an http:// callback and raft
+	// rejects it: "returnUrl does not match registered OAuth client" (dogfood: tygg).
+	// Keep http for local dev (localhost).
+	if (callbackUrl.hostname !== "localhost" && callbackUrl.hostname !== "127.0.0.1") {
+		callbackUrl.protocol = "https:";
+	}
+	const location = raftSetupUrl(config, callbackUrl.toString(), state);
 	c.header("Set-Cookie", loginStateCookie(c.req.raw, state, LOGIN_STATE_TTL_SECONDS));
 	c.header("Cache-Control", "no-store");
 	return c.redirect(location, 302);
