@@ -81,6 +81,14 @@ describe("keyRegistry: list / revoke (no plaintext, owner-scoped)", () => {
 		expect(await revokeOwnerKey(env, "ownerB", hash)).toBe(true); // owner allowed
 		expect(await resolveKey(env, "aibx_b")).toBeNull(); // now dead
 	});
+	it("scope-strict revoke: mailbox A's path can't revoke mailbox B's key (Gogo P3)", async () => {
+		const env = envWith();
+		const { hash } = await mintKey(env, { owner: "o1", scope: "b@x", token: "aibx_b", now: "t0" });
+		expect(await revokeOwnerKey(env, "o1", hash, "a@x")).toBe(false); // wrong scope → denied
+		expect(await resolveKey(env, "aibx_b")).not.toBeNull(); // still live
+		expect(await revokeOwnerKey(env, "o1", hash, "b@x")).toBe(true); // correct scope → ok
+		expect(await resolveKey(env, "aibx_b")).toBeNull();
+	});
 });
 
 describe("keyRegistry: keyGuidance", () => {

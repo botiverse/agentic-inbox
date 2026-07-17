@@ -293,7 +293,9 @@ app.get("/api/v1/mailboxes/:mailboxId/keys", async (c: AppContext) => {
 app.delete("/api/v1/mailboxes/:mailboxId/keys/:keyId", async (c: AppContext) => {
 	const owner = c.get("authOwner");
 	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
-	const ok = await revokeOwnerKey(c.env, owner, c.req.param("keyId")!);
+	// Pass the path mailbox as the expected scope so this route only revokes THIS
+	// mailbox's key (path-scope consistency), not another mailbox's key.
+	const ok = await revokeOwnerKey(c.env, owner, c.req.param("keyId")!, c.req.param("mailboxId")!);
 	if (!ok) return c.json({ error: "Key not found", code: "NOT_FOUND" }, 404);
 	return c.body(null, 204);
 });

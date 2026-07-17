@@ -111,17 +111,22 @@ export async function listOwnerKeys(
 	return out;
 }
 
-/** Revoke a key by hash ONLY if it belongs to `owner` (owner-scoped DELETE).
- * Returns false if the key doesn't exist or isn't the owner's. */
+/** Revoke a key by hash ONLY if it belongs to `owner` (owner-scoped DELETE), and
+ * — when `scope` is given — only if the key is at that scope, so a revoke issued
+ * under mailbox A's path can't touch mailbox B's key (path-scope consistency,
+ * Gogo review P3). Returns false if the key doesn't exist / isn't the owner's /
+ * is at a different scope. */
 export async function revokeOwnerKey(
 	env: { AGENTIC_INBOX_KEYS?: KVNamespace },
 	owner: string,
 	hash: string,
+	scope?: string,
 ): Promise<boolean> {
 	const kv = keyKV(env);
 	if (!kv) return false;
 	const rec = await kv.get<StoredKeyRecord>(`key:${hash}`, "json");
 	if (!rec || rec.owner !== owner) return false;
+	if (scope !== undefined && rec.scope !== scope) return false;
 	return revokeKey(env, hash);
 }
 
