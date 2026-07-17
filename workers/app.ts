@@ -251,6 +251,21 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 					endpoint: { method: "DELETE", path: "/api/v1/mailboxes/{mailboxId}" },
 				},
 				{
+					name: "rotate-mailbox-key",
+					description: "Rotate the access key for a mailbox you own: mints a fresh key (returned ONCE in `key`, with `key_guidance`) and invalidates the previous one. Use this if a key is lost or leaked. Note: raft-native calls don't need the key at all (stored session).",
+					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/keys/rotate" },
+				},
+				{
+					name: "list-mailbox-keys",
+					description: "List key metadata for a mailbox you own (id / scope / label / createdAt / disabled) — never the raw key. Use the id with revoke.",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/keys" },
+				},
+				{
+					name: "revoke-mailbox-key",
+					description: "Revoke a specific key of a mailbox you own (by the id from list-mailbox-keys).",
+					endpoint: { method: "DELETE", path: "/api/v1/mailboxes/{mailboxId}/keys/{keyId}" },
+				},
+				{
 					name: "send-mail",
 					description: "Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service (v0 is internal-only — agent-to-agent within the configured domain; the recipient mailbox must already exist). No external/outbound delivery yet.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/send" },

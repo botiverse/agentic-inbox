@@ -6,6 +6,18 @@ import type { Email, Folder, Mailbox } from "~/types";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
+// Onboarding guidance shipped alongside a freshly-issued mailbox key.
+export interface KeyGuidance {
+	what: string;
+	scope: string;
+	how_to_use: string;
+	save: string;
+	rotate: string;
+	revoke: string;
+	not_needed_for: string;
+}
+export type KeyResponse = { key?: string; key_guidance?: KeyGuidance };
+
 export class ApiError extends Error {
 	status: number;
 	body: Record<string, unknown>;
@@ -101,9 +113,13 @@ const api = {
 
 	// Mailboxes
 	listMailboxes: () => get<Mailbox[]>("/api/v1/mailboxes"),
-	// Claim returns the mailbox plus a mailbox-scoped access key (shown ONCE).
+	// Claim returns the mailbox plus a mailbox-scoped access key (shown ONCE) and
+	// onboarding guidance for that key.
 	createMailbox: (email: string, name: string, settings?: unknown) =>
-		post<Mailbox & { key?: string }>("/api/v1/mailboxes", { email, name, settings }),
+		post<Mailbox & KeyResponse>("/api/v1/mailboxes", { email, name, settings }),
+	// Rotate a mailbox key: mints a new one (shown ONCE) + invalidates the old.
+	rotateMailboxKey: (mailboxId: string) =>
+		post<{ id: string; email: string } & KeyResponse>(`/api/v1/mailboxes/${mailboxId}/keys/rotate`, {}),
 	getMailbox: (mailboxId: string) =>
 		get<Mailbox>(`/api/v1/mailboxes/${mailboxId}`),
 	updateMailbox: (mailboxId: string, settings: unknown) =>

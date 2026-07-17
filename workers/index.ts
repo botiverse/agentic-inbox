@@ -20,7 +20,7 @@ import {
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
 import { maxMailboxesForPlan, planForOwner, claimAllowedForHandle, classifyClaim } from "./lib/auth";
-import { mintKey, mintToken, recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
+import { mintKey, mintToken, recordOwnedMailbox, removeOwnedMailbox, rotateKey, listOwnerKeys, revokeOwnerKey, keyGuidance } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -229,7 +229,8 @@ app.post("/api/v1/mailboxes", async (c) => {
 	const token = mintToken();
 	await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
 
-	return c.json({ id: email, email, name: displayName, owner, settings: finalSettings, key: token, adopted: adopting || undefined }, adopting ? 200 : 201);
+	// Never hand out a bare credential — ship onboarding guidance with the key.
+	return c.json({ id: email, email, name: displayName, owner, settings: finalSettings, key: token, key_guidance: keyGuidance(email), adopted: adopting || undefined }, adopting ? 200 : 201);
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
@@ -262,6 +263,38 @@ app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
 		await ownerStub.release(owner, mailboxId);
 		await removeOwnedMailbox(c.env, owner, mailboxId);
 	}
+	return c.body(null, 204);
+});
+
+// -- Mailbox access keys (rotate / list / revoke) -------------------
+// All under requireMailbox, so the caller must own :mailboxId. Keys are scoped to
+// the mailbox; the raw token is only ever returned once (mint/rotate).
+
+// Rotate the mailbox key: mint a fresh one (returned once) + revoke the old.
+app.post("/api/v1/mailboxes/:mailboxId/keys/rotate", async (c: AppContext) => {
+	const mailboxId = c.req.param("mailboxId")!;
+	const owner = c.get("authOwner");
+	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
+	const token = mintToken();
+	const { revoked } = await rotateKey(c.env, { owner, scope: mailboxId, token, label: `mailbox ${mailboxId}`, now: new Date().toISOString() });
+	return c.json({ id: mailboxId, email: mailboxId, key: token, key_guidance: keyGuidance(mailboxId), revoked }, 201);
+});
+
+// List this mailbox's key metadata — NEVER the raw token.
+app.get("/api/v1/mailboxes/:mailboxId/keys", async (c: AppContext) => {
+	const mailboxId = c.req.param("mailboxId")!;
+	const owner = c.get("authOwner");
+	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
+	const keys = await listOwnerKeys(c.env, owner, mailboxId);
+	return c.json({ keys });
+});
+
+// Revoke a specific key of this mailbox (owner-scoped by keyId).
+app.delete("/api/v1/mailboxes/:mailboxId/keys/:keyId", async (c: AppContext) => {
+	const owner = c.get("authOwner");
+	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
+	const ok = await revokeOwnerKey(c.env, owner, c.req.param("keyId")!);
+	if (!ok) return c.json({ error: "Key not found", code: "NOT_FOUND" }, 404);
 	return c.body(null, 204);
 });
 

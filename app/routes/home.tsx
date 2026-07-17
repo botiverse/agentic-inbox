@@ -12,11 +12,11 @@ import {
 	Text,
 	useKumoToastManager,
 } from "@cloudflare/kumo";
-import { EnvelopeIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
+import { EnvelopeIcon, KeyIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link as RouterLink } from "react-router";
-import api from "~/services/api";
+import api, { type KeyGuidance } from "~/services/api";
 import {
 	useCreateMailbox,
 	useDeleteMailbox,
@@ -48,8 +48,10 @@ export default function HomeRoute() {
 	const [newName, setNewName] = useState("");
 	const [isCreating, setIsCreating] = useState(false);
 	const [createError, setCreateError] = useState<string | null>(null);
-	// A newly-claimed mailbox's scoped access key — shown ONCE (never recoverable).
-	const [mintedKey, setMintedKey] = useState<{ email: string; key: string } | null>(null);
+	// A freshly-issued mailbox key (claim or rotate) — shown ONCE (never recoverable),
+	// carried with its onboarding guidance so we never show a bare credential.
+	const [mintedKey, setMintedKey] = useState<{ email: string; key: string; guidance?: KeyGuidance } | null>(null);
+	const [rotatingId, setRotatingId] = useState<string | null>(null);
 	const [isDeleteOpen, setIsDeleteOpen] = useState(false);
 	const [mailboxToDelete, setMailboxToDelete] = useState<{
 		id: string;
@@ -81,12 +83,25 @@ export default function HomeRoute() {
 			setNewPrefix("");
 			setNewName("");
 			// Surface the mailbox-scoped access key once — it is never shown again.
-			if (res?.key) setMintedKey({ email, key: res.key });
+			if (res?.key) setMintedKey({ email, key: res.key, guidance: res.key_guidance });
 		} catch (err: unknown) {
 			const message = (err instanceof Error ? err.message : null) || "Failed to create mailbox";
 			setCreateError(message);
 		} finally {
 			setIsCreating(false);
+		}
+	};
+
+	const handleRotate = async (mailboxId: string, email: string) => {
+		setRotatingId(mailboxId);
+		try {
+			const res = await api.rotateMailboxKey(mailboxId);
+			if (res?.key) setMintedKey({ email, key: res.key, guidance: res.key_guidance });
+			toastManager.add({ title: "Key rotated — old key is now invalid" });
+		} catch {
+			toastManager.add({ title: "Failed to rotate key", variant: "error" });
+		} finally {
+			setRotatingId(null);
 		}
 	};
 
@@ -158,6 +173,19 @@ export default function HomeRoute() {
 										{account.email}
 									</div>
 								</div>
+								<Button
+									variant="ghost"
+									size="sm"
+									shape="square"
+									icon={<KeyIcon size={16} />}
+									aria-label={`Rotate access key for ${account.email}`}
+									loading={rotatingId === account.id}
+									onClick={(e) => {
+										e.preventDefault();
+										e.stopPropagation();
+										handleRotate(account.id, account.email);
+									}}
+								/>
 								<Button
 									variant="ghost"
 									size="sm"
@@ -300,6 +328,14 @@ export default function HomeRoute() {
 						<code className="block break-all rounded border p-2 text-xs font-mono">
 							{mintedKey?.key}
 						</code>
+						{mintedKey?.guidance && (
+							<div className="rounded-md bg-kumo-recessed p-3 text-xs text-kumo-subtle space-y-1.5">
+								<p><span className="font-medium text-kumo-default">What:</span> {mintedKey.guidance.what}</p>
+								<p><span className="font-medium text-kumo-default">Use it:</span> {mintedKey.guidance.how_to_use}</p>
+								<p><span className="font-medium text-kumo-default">Lost it?</span> {mintedKey.guidance.rotate}</p>
+								<p>{mintedKey.guidance.not_needed_for}</p>
+							</div>
+						)}
 						<div className="flex justify-end gap-2">
 							<Button
 								size="sm"
