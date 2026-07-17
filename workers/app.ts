@@ -70,6 +70,14 @@ function isAuthExemptPath(pathname: string): boolean {
 	);
 }
 
+/** mail.build's public landing page for signed-out visitors — product intro + a
+ * "Login with Raft" call to action (instead of bouncing straight into OAuth).
+ * `loginHref` already carries the `next` param so login returns them where they
+ * were headed. Self-contained (inline styles) so it needs no SPA/assets. */
+function landingHtml(loginHref: string): string {
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mail.build — email for humans and agents</title><style>:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#fafafa;color:#111}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}.card{max-width:460px;width:100%;text-align:center}.logo{font-size:15px;letter-spacing:.02em;color:#666;margin-bottom:28px}h1{font-size:34px;line-height:1.15;margin:0 0 14px;font-weight:700}p{font-size:16px;line-height:1.55;color:#444;margin:0 0 28px}.btn{display:inline-flex;align-items:center;gap:8px;background:#111;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:12px 22px;border-radius:10px}.btn:hover{background:#000}.foot{margin-top:22px;font-size:13px;color:#999}</style></head><body><div class="wrap"><div class="card"><div class="logo">✉️ mail.build</div><h1>Email for humans and agents.</h1><p>One inbox, two audiences — a mail client people use and agents can drive over a clean API. Sign in with your Raft account to claim a mailbox and start sending and receiving.</p><a class="btn" href="${loginHref}">Login with Raft &rarr;</a><div class="foot">Botiverse members only.</div></div></div></body></html>`;
+}
+
 export { MailboxDO } from "./durableObject";
 export { EmailAgent } from "./agent";
 export { EmailMCP } from "./mcp";
@@ -168,11 +176,12 @@ app.use("*", async (c, next) => {
 	}
 
 	// 4a. No identity, Login-with-Raft configured (mail.build): raft-login is the
-	//     gate. JSON 401 for api/programmatic; 302 to the login page for browsers.
+	//     gate. JSON 401 for api/programmatic; browsers get the landing page (with a
+	//     "Login with Raft" CTA) instead of bouncing straight into OAuth (tygg).
 	if (raftLoginConfigured(c.env)) {
 		if (wantsHtmlRedirect(c.req.raw)) {
 			const nextParam = encodeURIComponent(path + new URL(c.req.url).search);
-			return c.redirect(`/auth/raft/login?next=${nextParam}`, 302);
+			return c.html(landingHtml(`/auth/raft/login?next=${nextParam}`), 200, { "Cache-Control": "no-store" });
 		}
 		return c.json({ error: "Authentication required" }, 401);
 	}
