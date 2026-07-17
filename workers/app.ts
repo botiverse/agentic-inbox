@@ -379,10 +379,18 @@ app.all("/auth/raft/callback", async (c) => {
 // MCP server endpoint — used by AI coding tools (ProtoAgent, Claude Code, Cursor, etc.)
 // Must be before API routes and React Router catch-all
 const mcpHandler = EmailMCP.serve("/mcp", { binding: "EMAIL_MCP" });
+// INTERIM SECURITY GATE: the MCP tools are not yet owner-scoped (verifyMailbox
+// only checks existence, list_mailboxes returns ALL), so any authenticated
+// non-admin caller could enumerate/read other tenants' mailboxes. Restrict /mcp
+// to admin until the per-tool owner-scoping rebuild lands (dogfood: Gogo). /mcp is
+// not advertised in the manifest and not in active agent use, so this is no-impact.
+const mcpAdminOnly = (isAdmin: unknown) => isAdmin === true;
 app.all("/mcp", async (c) => {
+	if (!mcpAdminOnly(c.get("authIsAdmin"))) return c.json({ error: "MCP is temporarily restricted while it is scoped to per-owner access.", code: "FORBIDDEN" }, 403);
 	return mcpHandler.fetch(c.req.raw, c.env, c.executionCtx as ExecutionContext);
 });
 app.all("/mcp/*", async (c) => {
+	if (!mcpAdminOnly(c.get("authIsAdmin"))) return c.json({ error: "MCP is temporarily restricted while it is scoped to per-owner access.", code: "FORBIDDEN" }, 403);
 	return mcpHandler.fetch(c.req.raw, c.env, c.executionCtx as ExecutionContext);
 });
 
