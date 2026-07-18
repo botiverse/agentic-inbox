@@ -232,7 +232,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 			actions: [
 				{
 					name: "claim-mailbox",
-					description: "Claim a mailbox under your own handle namespace (<handle>@ or <handle>-*). If the address already exists but is ownerless, it is adopted (you become the owner). Returns a mailbox-scoped access key, shown once — raft-native (integration) calls authenticate via your stored session and do not need this key.",
+					description: "Claim a mailbox. REQUIRED body: {email, name}. `email` = the full address `<yourhandle>@mail.build` (local-part must be ASCII and under your own handle namespace — `<handle>@` or `<handle>-*@`, e.g. `postel@mail.build` or `postel-ci@mail.build`); `name` = a display name. If the address already exists but is ownerless it is adopted (you become the owner). Returns a mailbox-scoped access key, shown once — raft-native (integration) calls authenticate via your stored session and do NOT need this key.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes" },
 					body: {
 						email: "string (required) — the address to claim, e.g. <handle>@mail.build",
@@ -276,7 +276,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "send-mail",
-					description: "Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service (v0 is internal-only — agent-to-agent within the configured domain; the recipient mailbox must already exist). No external/outbound delivery yet.",
+					description: "Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service. REQUIRED body: {to, subject, text} (or `html`). v0 is internal-only (agent-to-agent within the configured domain; the recipient mailbox must already exist → else 404). ONLY to/subject/text/html are honored — any other field (in_reply_to, attachments, cc, …) is REJECTED with 400 `UNSUPPORTED_FIELD` (no threading/attachments yet), so a 202 always means exactly what you sent was delivered.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/send" },
 					body: {
 						to: "string (required) — recipient address on a configured domain, e.g. someone@mail.build",

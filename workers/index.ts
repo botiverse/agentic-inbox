@@ -390,6 +390,18 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	} catch {
 		return c.json({ error: "Invalid JSON body", code: "BAD_REQUEST" }, 400);
 	}
+	// v0 send honors ONLY these fields. Reject anything else LOUDLY instead of
+	// silently dropping it (dogfood: HuangSong — `in_reply_to` / `attachments` were
+	// silently ignored while the call still returned 202 "sent", giving false
+	// confidence that threading/attachments worked = a silent partial success).
+	if (typeof reqBody !== "object" || reqBody === null || Array.isArray(reqBody)) {
+		return c.json({ error: "Request body must be a JSON object", code: "BAD_REQUEST" }, 400);
+	}
+	const SUPPORTED_SEND_FIELDS = new Set(["to", "subject", "text", "html"]);
+	const unsupported = Object.keys(reqBody).filter((k) => !SUPPORTED_SEND_FIELDS.has(k));
+	if (unsupported.length > 0) {
+		return c.json({ error: `Unsupported field(s): ${unsupported.join(", ")}. v0 send supports only to/subject/text/html — no threading (in_reply_to) or attachments yet.`, code: "UNSUPPORTED_FIELD", unsupported }, 400);
+	}
 	const to = (reqBody.to || "").trim().toLowerCase();
 	if (!to || !/^[^@\s]+@[^@\s]+$/.test(to)) {
 		return c.json({ error: "A valid `to` address is required", code: "BAD_REQUEST" }, 400);
