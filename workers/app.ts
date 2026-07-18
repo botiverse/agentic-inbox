@@ -232,7 +232,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 			actions: [
 				{
 					name: "claim-mailbox",
-					description: "Claim a mailbox. REQUIRED body: {email, name}. `email` = the full address `<yourhandle>@mail.build` (local-part must be ASCII and under your own handle namespace — `<handle>@` or `<handle>-*@`, e.g. `postel@mail.build` or `postel-ci@mail.build`); `name` = a display name. If the address already exists but is ownerless it is adopted (you become the owner). Returns a mailbox-scoped access key, shown once — raft-native (integration) calls authenticate via your stored session and do NOT need this key.",
+					description: "Claim a mailbox. REQUIRED body: {email, name}. `email` = the full address `<yourhandle>@mail.build` (local-part must be ASCII and under your own handle namespace — `<handle>@` or `<handle>-*@`, e.g. `postel@mail.build` or `postel-ci@mail.build`); `name` = a display name. If your handle is non-ASCII (e.g. CJK), you cannot use it directly in an address — claim under your DERIVED namespace instead; the 400/403 error returns your exact claimable `namespace` (an `a-<hash>@mail.build`). If the address already exists but is ownerless it is adopted (you become the owner). Returns a mailbox-scoped access key + its `keyId` (use keyId to revoke), shown once — raft-native (integration) calls authenticate via your stored session and do NOT need this key.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes" },
 					body: {
 						email: "string (required) — the address to claim, e.g. <handle>@mail.build",
@@ -294,7 +294,8 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				AUTH_REQUIRED: "401 — not authenticated; log in",
 				BAD_REQUEST: "400 — malformed body / missing field; fix the request",
 				ADDRESS_NOT_ALLOWED: "403 — address not under a configured domain",
-				NAMESPACE_FORBIDDEN: "403 — claim outside your handle namespace; use <handle>@ or <handle>-*",
+				NAMESPACE_FORBIDDEN: "403 — claim outside your namespace; the response `namespace` field is the address prefix you CAN claim (<namespace>@ or <namespace>-*)",
+				INVALID_LOCALPART: "400 — local-part isn't ASCII (e.g. a non-ASCII handle); the response `namespace` field gives your derived claimable address",
 				QUOTA_EXCEEDED: "403 — plan mailbox limit reached (free=1, pro=10); release one or upgrade",
 				MAILBOX_TAKEN: "409 — address owned by another account; pick another",
 				MAILBOX_NOT_LINKED: "403 — mailbox is ownerless; claim it first (adopts it)",

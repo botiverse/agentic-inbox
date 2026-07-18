@@ -15,6 +15,8 @@ import {
 	claimAllowedForHandle,
 	isReservedSystemLocalPart,
 	classifyClaim,
+	asciiNamespaceForHandle,
+	isValidAsciiLocalPart,
 } from "./auth";
 
 describe("hashApiKey", () => {
@@ -170,6 +172,44 @@ describe("claimAllowedForHandle (v0 anti-squat)", () => {
 		expect(isReservedSystemLocalPart("NoReply")).toBe(true);
 		expect(isReservedSystemLocalPart("mailer-daemon")).toBe(true);
 		expect(isReservedSystemLocalPart("postel")).toBe(false);
+	});
+});
+
+describe("asciiNamespaceForHandle (non-ASCII handle unlock — AX: 跳虎)", () => {
+	it("returns an ASCII handle unchanged (lowercased)", () => {
+		expect(asciiNamespaceForHandle("postel")).toBe("postel");
+		expect(asciiNamespaceForHandle("Gogo-Signup-Dogfood")).toBe("gogo-signup-dogfood");
+	});
+	it("derives a stable `a-<hash>` slug for a non-ASCII handle", () => {
+		const ns = asciiNamespaceForHandle("跳虎");
+		expect(ns).toMatch(/^a-[0-9a-f]{8}$/);
+		expect(asciiNamespaceForHandle("跳虎")).toBe(ns); // deterministic
+	});
+	it("distinct non-ASCII handles get distinct namespaces (no collision squat)", () => {
+		expect(asciiNamespaceForHandle("跳虎")).not.toBe(asciiNamespaceForHandle("老虎"));
+	});
+	it("the derived namespace is itself claimable by that handle", () => {
+		const ns = asciiNamespaceForHandle("跳虎");
+		expect(claimAllowedForHandle(ns, ns)).toBe(true); // a-xxxx@
+		expect(claimAllowedForHandle(`${ns}-notes`, ns)).toBe(true); // a-xxxx-notes@
+		expect(claimAllowedForHandle("tiaohu", ns)).toBe(false); // arbitrary ASCII still blocked
+	});
+	it("empty handle yields empty namespace (no claim path — handled as 403 upstream)", () => {
+		expect(asciiNamespaceForHandle("")).toBe("");
+	});
+});
+
+describe("isValidAsciiLocalPart", () => {
+	it("accepts valid ASCII local-parts", () => {
+		expect(isValidAsciiLocalPart("postel")).toBe(true);
+		expect(isValidAsciiLocalPart("a-3f9c2b1e")).toBe(true);
+		expect(isValidAsciiLocalPart("bob.smith_1")).toBe(true);
+	});
+	it("rejects non-ASCII and malformed local-parts", () => {
+		expect(isValidAsciiLocalPart("跳虎")).toBe(false);
+		expect(isValidAsciiLocalPart("-lead")).toBe(false);
+		expect(isValidAsciiLocalPart("trail-")).toBe(false);
+		expect(isValidAsciiLocalPart("")).toBe(false);
 	});
 });
 

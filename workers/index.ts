@@ -19,7 +19,7 @@ import {
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
-import { maxMailboxesForPlan, planForOwner, claimAllowedForHandle, classifyClaim } from "./lib/auth";
+import { maxMailboxesForPlan, planForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart } from "./lib/auth";
 import { mintKey, mintToken, recordOwnedMailbox, removeOwnedMailbox, rotateKey, listOwnerKeys, revokeOwnerKey, keyGuidance } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
@@ -31,7 +31,10 @@ type AppContext = Context<MailboxContext>;
 // -- Request body schemas (kept for validation) ---------------------
 
 const CreateMailboxBody = z.object({
-	email: z.string().email(),
+	// Relaxed from .email() so a non-ASCII / malformed address returns an
+	// actionable, namespace-aware 400 (with the caller's derived namespace)
+	// instead of a bare zod error the caller can't act on (AX: 跳虎).
+	email: z.string().min(1),
 	name: z.string().min(1),
 	settings: z.record(z.any()).optional(), // unvalidated — agentSystemPrompt goes straight to AI
 });
@@ -135,6 +138,30 @@ app.post("/api/v1/mailboxes", async (c) => {
 	const { name, settings, email: rawEmail } = parsed;
 	const email = rawEmail.toLowerCase();
 
+	// Address shape + local-part must be ASCII (mail.build only issues ASCII
+	// addresses). Validated BEFORE auth so malformed input returns a clean 400
+	// (not a 500 or an auth 401 that hides the real problem). The caller's
+	// namespace is derived here so every rejection can name the exact address
+	// they CAN claim — crucial for non-ASCII-handle agents, who otherwise hit a
+	// dead-end 400/403 with no path (AX: 跳虎). `handle` is present only when
+	// authenticated, so an unauthenticated caller just gets the bare shape error.
+	const handle = c.get("authHandle");
+	const namespace = handle ? asciiNamespaceForHandle(handle) : "";
+	const derivedNs = !!handle && namespace !== handle.toLowerCase();
+	const nsHint = namespace
+		? (derivedNs
+			? ` Your handle "${handle}" has no ASCII email form, so your claimable namespace is derived: ${namespace}@mail.build (or ${namespace}-<suffix>@mail.build).`
+			: ` Your claimable namespace is ${namespace}@mail.build (or ${namespace}-<suffix>@mail.build).`)
+		: "";
+	const atIdx = email.indexOf("@");
+	const localPart = atIdx > 0 ? email.slice(0, atIdx) : "";
+	if (atIdx < 1 || email.indexOf("@") !== email.lastIndexOf("@") || !email.slice(atIdx + 1)) {
+		return c.json({ error: `email must be a single address of the form <local-part>@<domain>.${nsHint}`, code: "BAD_REQUEST", namespace: namespace || undefined }, 400);
+	}
+	if (!isValidAsciiLocalPart(localPart)) {
+		return c.json({ error: `Mailbox local-part must be ASCII (letters, digits, . _ -).${nsHint}`, code: "INVALID_LOCALPART", namespace: namespace || undefined }, 400);
+	}
+
 	// Claim requires an authenticated owner (agent scoped key or human session).
 	const owner = c.get("authOwner");
 	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
@@ -153,15 +180,14 @@ app.post("/api/v1/mailboxes", async (c) => {
 	}
 
 	// Anti-squat: non-admin callers may only claim within their own handle
-	// namespace (`<handle>@` / `<handle>-*`), never a reserved system name.
+	// namespace (`<namespace>@` / `<namespace>-*`), never a reserved system name.
 	// Prevents agent A from claiming B's identity address.
 	if (!isAdmin) {
-		const handle = c.get("authHandle");
-		const localPart = email.split("@")[0] ?? "";
-		if (!handle || !claimAllowedForHandle(localPart, handle)) {
+		if (!handle || !claimAllowedForHandle(localPart, namespace)) {
 			return c.json({
-				error: "You can only claim mailboxes under your own handle (<handle>@ or <handle>-*); reserved system names are not allowed",
+				error: `You can only claim mailboxes under your own namespace, and reserved system names are not allowed.${nsHint}`,
 				code: "NAMESPACE_FORBIDDEN",
+				namespace: namespace || undefined,
 			}, 403);
 		}
 	}

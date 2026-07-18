@@ -172,6 +172,35 @@ export function isReservedSystemLocalPart(localPart: string): boolean {
  * `callerHandle` is the caller's raft `preferred_username`.
  * (Free / shared names outside your namespace are a fast-follow.)
  */
+/** A valid ASCII email local-part (mail.build only issues ASCII addresses). */
+export function isValidAsciiLocalPart(localPart: string): boolean {
+	return /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/.test(localPart.toLowerCase());
+}
+
+/**
+ * The ASCII namespace an owner may claim mailboxes under. An ASCII-usable handle
+ * keeps its own name (unchanged behaviour). A handle containing ANY non-ASCII
+ * char — which could never anchor an ASCII email local-part — would otherwise be
+ * fully locked out of claiming (CJK addr → 400 Invalid email; ASCII addr → 403
+ * NAMESPACE_FORBIDDEN, a whole class of agents with no path). Such handles get a
+ * stable derived slug `a-<hash>` so they still have a claimable namespace.
+ * Deterministic (sync FNV-1a over the UTF-8 bytes) — uniqueness is first-come at
+ * claim time anyway, so the slug only needs to be stable + collision-unlikely.
+ * (AX: 跳虎 fresh-agent dogfood — non-ASCII handle couldn't claim anything.)
+ */
+export function asciiNamespaceForHandle(handle: string): string {
+	const h = (handle || "").toLowerCase();
+	if (!h) return ""; // no handle → no claim path (caller enforces 403)
+	if (isValidAsciiLocalPart(h)) return h;
+	const bytes = new TextEncoder().encode(h);
+	let hash = 0x811c9dc5;
+	for (const b of bytes) {
+		hash ^= b;
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return `a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 export function claimAllowedForHandle(localPart: string, callerHandle: string): boolean {
 	const lp = localPart.toLowerCase();
 	const ch = callerHandle.toLowerCase();
