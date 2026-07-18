@@ -227,10 +227,13 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// Mint a mailbox-scoped access key — returned ONCE (finest isolation: this
 	// key can only touch this one mailbox).
 	const token = mintToken();
-	await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
+	const { hash: keyId } = await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
 
 	// Never hand out a bare credential — ship onboarding guidance with the key.
-	return c.json({ id: email, email, name: displayName, owner, settings: finalSettings, key: token, key_guidance: keyGuidance(email), adopted: adopting || undefined }, adopting ? 200 : 201);
+	// `keyId` is the handle for revoke (DELETE .../keys/{id}) so the caller can
+	// revoke the key it just got in one step, without a list-keys round-trip
+	// (AX: HuangSong — claim/rotate returned the raw key but not its id).
+	return c.json({ id: email, email, name: displayName, owner, settings: finalSettings, key: token, keyId, key_guidance: keyGuidance(email), adopted: adopting || undefined }, adopting ? 200 : 201);
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
@@ -276,8 +279,9 @@ app.post("/api/v1/mailboxes/:mailboxId/keys/rotate", async (c: AppContext) => {
 	const owner = c.get("authOwner");
 	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
 	const token = mintToken();
-	const { revoked } = await rotateKey(c.env, { owner, scope: mailboxId, token, label: `mailbox ${mailboxId}`, now: new Date().toISOString() });
-	return c.json({ id: mailboxId, email: mailboxId, key: token, key_guidance: keyGuidance(mailboxId), revoked }, 201);
+	const { hash: keyId, revoked } = await rotateKey(c.env, { owner, scope: mailboxId, token, label: `mailbox ${mailboxId}`, now: new Date().toISOString() });
+	// Return `keyId` so the new key can be revoked in one step (no list-keys hop).
+	return c.json({ id: mailboxId, email: mailboxId, key: token, keyId, key_guidance: keyGuidance(mailboxId), revoked }, 201);
 });
 
 // List this mailbox's key metadata — NEVER the raw token.
