@@ -427,6 +427,17 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	if (typeof reqBody !== "object" || reqBody === null || Array.isArray(reqBody)) {
 		return c.json({ error: "Request body must be a JSON object", code: "BAD_REQUEST" }, 400);
 	}
+	// The `raft integration invoke` CLI currently merges a POST action's PATH param
+	// into the request BODY (GET/DELETE bind it to the path correctly — dogfood:
+	// 跳虎), so send-mail arrives with a redundant `mailboxId` in the body that
+	// equals the path param. That's a harmless plumbing echo, NOT meaningful data
+	// loss — drop it (Postel's law: liberal about a redundant path echo) so the
+	// primary raft-native send path works, while STILL rejecting real unsupported
+	// fields (in_reply_to/attachments) below. The CLI merge bug is routed to Ray;
+	// a `mailboxId` that does NOT match the path falls through and is rejected loud.
+	if ("mailboxId" in reqBody && String((reqBody as Record<string, unknown>).mailboxId).toLowerCase() === from) {
+		delete (reqBody as Record<string, unknown>).mailboxId;
+	}
 	const SUPPORTED_SEND_FIELDS = new Set(["to", "subject", "text", "html"]);
 	const unsupported = Object.keys(reqBody).filter((k) => !SUPPORTED_SEND_FIELDS.has(k));
 	if (unsupported.length > 0) {
