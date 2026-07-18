@@ -318,3 +318,26 @@ export async function getFullThread(
 
 	return { thread_id: threadId, message_count: enriched.length, messages: enriched };
 }
+
+/**
+ * v0 send honors ONLY `to`/`subject`/`text`/`html`. Returns the list of
+ * unsupported body fields (empty = OK to send). Two dogfood findings shaped this:
+ *  - HuangSong: a meaningful unsupported field (in_reply_to/attachments/cc/…)
+ *    must be rejected LOUD, never silently dropped while returning 202.
+ *  - 跳虎: the `raft integration invoke` CLI merges a POST action's PATH param
+ *    into the request BODY, so send-mail arrives with a redundant `mailboxId`
+ *    that equals the path. That's a harmless plumbing echo, not meaningful data
+ *    loss — tolerate it (Postel's law) when it matches `pathMailbox`; a
+ *    `mailboxId` that DIFFERS from the path is still reported (guards misrouting).
+ */
+export function unsupportedSendFields(
+	body: Record<string, unknown>,
+	pathMailbox: string,
+): string[] {
+	const SUPPORTED = new Set(["to", "subject", "text", "html"]);
+	return Object.keys(body).filter((k) => {
+		if (SUPPORTED.has(k)) return false;
+		if (k === "mailboxId" && String(body[k]).toLowerCase() === pathMailbox.toLowerCase()) return false;
+		return true;
+	});
+}

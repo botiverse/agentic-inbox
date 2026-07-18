@@ -16,6 +16,7 @@ import {
 	listMailboxes,
 	getFullEmail,
 	stripHtmlToText,
+	unsupportedSendFields,
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
@@ -420,26 +421,17 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	} catch {
 		return c.json({ error: "Invalid JSON body", code: "BAD_REQUEST" }, 400);
 	}
-	// v0 send honors ONLY these fields. Reject anything else LOUDLY instead of
-	// silently dropping it (dogfood: HuangSong — `in_reply_to` / `attachments` were
-	// silently ignored while the call still returned 202 "sent", giving false
-	// confidence that threading/attachments worked = a silent partial success).
+	// v0 send honors ONLY to/subject/text/html. Reject anything else LOUDLY
+	// instead of silently dropping it (dogfood: HuangSong — in_reply_to/attachments
+	// were silently ignored while the call still returned 202 "sent" = false
+	// confidence). A redundant `mailboxId` echo that equals the path param is
+	// tolerated (the `raft integration invoke` CLI merges a POST action's path
+	// param into the body — dogfood: 跳虎; CLI root cause routed to Ray). See
+	// unsupportedSendFields for the exact boundary (== path drop / ≠ path reject).
 	if (typeof reqBody !== "object" || reqBody === null || Array.isArray(reqBody)) {
 		return c.json({ error: "Request body must be a JSON object", code: "BAD_REQUEST" }, 400);
 	}
-	// The `raft integration invoke` CLI currently merges a POST action's PATH param
-	// into the request BODY (GET/DELETE bind it to the path correctly — dogfood:
-	// 跳虎), so send-mail arrives with a redundant `mailboxId` in the body that
-	// equals the path param. That's a harmless plumbing echo, NOT meaningful data
-	// loss — drop it (Postel's law: liberal about a redundant path echo) so the
-	// primary raft-native send path works, while STILL rejecting real unsupported
-	// fields (in_reply_to/attachments) below. The CLI merge bug is routed to Ray;
-	// a `mailboxId` that does NOT match the path falls through and is rejected loud.
-	if ("mailboxId" in reqBody && String((reqBody as Record<string, unknown>).mailboxId).toLowerCase() === from) {
-		delete (reqBody as Record<string, unknown>).mailboxId;
-	}
-	const SUPPORTED_SEND_FIELDS = new Set(["to", "subject", "text", "html"]);
-	const unsupported = Object.keys(reqBody).filter((k) => !SUPPORTED_SEND_FIELDS.has(k));
+	const unsupported = unsupportedSendFields(reqBody as Record<string, unknown>, from);
 	if (unsupported.length > 0) {
 		return c.json({ error: `Unsupported field(s): ${unsupported.join(", ")}. v0 send supports only to/subject/text/html — no threading (in_reply_to) or attachments yet.`, code: "UNSUPPORTED_FIELD", unsupported }, 400);
 	}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail } from "./email-helpers";
+import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields } from "./email-helpers";
 
 describe("getFullEmail body_html is raw (XSS guard — dogfood: Duoyu)", () => {
 	// A sender safely-escaped `<script>` as display text. body_html is rendered,
@@ -66,5 +66,37 @@ describe("looksLikeHtml (get-email body_html null semantics)", () => {
 		expect(looksLikeHtml('<a href="https://x">link</a>')).toBe(true);
 		expect(looksLikeHtml("<!DOCTYPE html><html><body>x</body></html>")).toBe(true);
 		expect(looksLikeHtml("text with a closing </span> tag")).toBe(true);
+	});
+});
+
+describe("unsupportedSendFields (strict fields + tolerant path-echo — dogfood: HuangSong / 跳虎)", () => {
+	const box = "postel@mail.build";
+
+	it("accepts exactly to/subject/text/html", () => {
+		expect(unsupportedSendFields({ to: "a@mail.build", subject: "s", text: "t" }, box)).toEqual([]);
+		expect(unsupportedSendFields({ to: "a@mail.build", html: "<p>x</p>" }, box)).toEqual([]);
+	});
+
+	it("drops a redundant `mailboxId` that equals the path param (CLI POST path-echo)", () => {
+		// The `raft integration invoke` CLI merges the POST path param into the body.
+		expect(unsupportedSendFields({ mailboxId: "postel@mail.build", to: "a@mail.build", subject: "s", text: "t" }, box)).toEqual([]);
+		// case-insensitive match (addresses are lower-cased at the handler)
+		expect(unsupportedSendFields({ mailboxId: "Postel@Mail.Build", to: "a@mail.build" }, box)).toEqual([]);
+	});
+
+	it("STILL reports a `mailboxId` that differs from the path (guards misrouting)", () => {
+		expect(unsupportedSendFields({ mailboxId: "someone-else@mail.build", to: "a@mail.build" }, box)).toEqual(["mailboxId"]);
+	});
+
+	it("STILL reports meaningful unsupported fields (never silently dropped)", () => {
+		expect(unsupportedSendFields({ to: "a@mail.build", subject: "s", text: "t", in_reply_to: "x" }, box)).toEqual(["in_reply_to"]);
+		expect(unsupportedSendFields({ to: "a@mail.build", attachments: [] }, box)).toEqual(["attachments"]);
+		expect(unsupportedSendFields({ to: "a@mail.build", cc: "b@mail.build" }, box)).toEqual(["cc"]);
+	});
+
+	it("reports both a mismatched mailboxId and other unsupported fields together", () => {
+		const out = unsupportedSendFields({ mailboxId: "other@mail.build", to: "a@mail.build", in_reply_to: "x" }, box);
+		expect(out).toContain("mailboxId");
+		expect(out).toContain("in_reply_to");
 	});
 });
