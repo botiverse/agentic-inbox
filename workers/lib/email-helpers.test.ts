@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet } from "./email-helpers";
+import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet, snippetFromFullBody } from "./email-helpers";
 
 describe("getFullEmail body_html is raw (XSS guard — dogfood: Duoyu)", () => {
 	// A sender safely-escaped `<script>` as display text. body_html is rendered,
@@ -130,5 +130,30 @@ describe("cleanSnippet (list preview — drops mid-tag truncation fragments — 
 		expect(cleanSnippet(null)).toBe("");
 		expect(cleanSnippet("")).toBe("");
 		expect(cleanSnippet(undefined)).toBe("");
+	});
+});
+
+describe("snippetFromFullBody (durable ingest snippet — Gogo semantics)", () => {
+	it("strips like body_text (a prefix of body_text, no drift)", () => {
+		expect(snippetFromFullBody("<p>Your code is 123456</p>")).toBe("Your code is 123456");
+		expect(snippetFromFullBody("<p>a&amp;b</p>")).toBe("a&b");
+	});
+	it("returns the whole text when ≤ maxLen", () => {
+		expect(snippetFromFullBody("short text", 300)).toBe("short text");
+	});
+	it("truncates on the last whitespace ≤ maxLen (no ellipsis)", () => {
+		// 3 words, cut at 8 → last space before index 8 is after "aa"(? ) — verify boundary
+		expect(snippetFromFullBody("alpha beta gamma", 12)).toBe("alpha beta");
+		expect(snippetFromFullBody("alpha beta gamma", 8)).toBe("alpha");
+	});
+	it("hard-cuts at maxLen when there is no whitespace (long URL/token)", () => {
+		const url = "https://mail.build/verify?token=" + "a".repeat(400);
+		const out = snippetFromFullBody(url, 300);
+		expect(out.length).toBe(300);
+		expect(out).toBe(url.slice(0, 300)); // hard cut, not empty
+	});
+	it("handles null/empty", () => {
+		expect(snippetFromFullBody(null)).toBe("");
+		expect(snippetFromFullBody("")).toBe("");
 	});
 });

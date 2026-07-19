@@ -355,3 +355,21 @@ export function cleanSnippet(raw: string | null | undefined, maxLen = 300): stri
 	if (!raw) return "";
 	return stripHtmlToText(raw.replace(/<[^>]*$/, "")).slice(0, maxLen);
 }
+
+/**
+ * Canonical snippet from a FULL body, for the durable ingest column (Gogo's DO
+ * write path) and the self-healing read-write-back. Semantics pinned with Gogo:
+ * strip via the same primitive as body_text (so the snippet is by construction a
+ * prefix of body_text — zero list-vs-ingest drift), truncate on the last
+ * whitespace ≤ maxLen (no ellipsis), and hard-cut at maxLen when the first
+ * maxLen chars have no whitespace (a long URL/token) rather than returning empty.
+ * The full body has complete tags, so no dangling-tag handling is needed here —
+ * that (cleanSnippet) is only for the pre-truncated SUBSTR fallback. (AX: Yingjun.)
+ */
+export function snippetFromFullBody(body: string | null | undefined, maxLen = 300): string {
+	const text = stripHtmlToText(body || "");
+	if (text.length <= maxLen) return text;
+	const slice = text.slice(0, maxLen);
+	const lastWs = slice.lastIndexOf(" ");
+	return lastWs > 0 ? slice.slice(0, lastWs) : slice;
+}
