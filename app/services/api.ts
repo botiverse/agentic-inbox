@@ -133,10 +133,10 @@ const api = {
 	sendEmail: (mailboxId: string, email: unknown) =>
 		post<void>(`/api/v1/mailboxes/${mailboxId}/emails`, email),
 	getEmail: (mailboxId: string, id: string, opts?: { signal?: AbortSignal }) =>
-		// get-email is LEAN by default (agents pay tokens for it); the human UI
-		// renders the raw body + a raw-headers dialog, so it opts into the full
-		// payload here. Agents omit `include` and get the lean shape (AX: Yingjun).
-		get<Email>(`/api/v1/mailboxes/${mailboxId}/emails/${id}?include=raw_headers,raw_body`, { signal: opts?.signal }),
+		// get-email is LEAN by default (agents pay tokens for it). The UI renders
+		// from body_html/body_text (canonical) and only needs raw_headers for its
+		// "view source" dialog, so it opts into just that (AX: Yingjun).
+		get<Email>(`/api/v1/mailboxes/${mailboxId}/emails/${id}?include=raw_headers`, { signal: opts?.signal }),
 	updateEmail: (mailboxId: string, id: string, data: unknown) =>
 		put<Email>(`/api/v1/mailboxes/${mailboxId}/emails/${id}`, data),
 	deleteEmail: (mailboxId: string, id: string) =>

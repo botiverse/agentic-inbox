@@ -333,6 +333,19 @@ app.delete("/api/v1/mailboxes/:mailboxId/keys/:keyId", async (c: AppContext) => 
 
 // -- Emails ---------------------------------------------------------
 
+// Canonicalize list/search rows for the API: (1) clean the snippet preview — the
+// DO computes it as SUBSTR(body,1,300) = raw HTML, which can cut mid-tag and
+// leave a dangling `…<img class="s` fragment the complete-tag stripper can't
+// remove (AX: Yingjun; interim ahead of Gogo's ingest snippet column); (2) alias
+// the DO storage columns sender/recipient → canonical from/to (the API exposes
+// from/to; storage keeps sender/recipient — first-principles, tygg pre-launch
+// break-freely). Gogo's PR then drops sender/recipient + moves snippet to a column.
+function canonicalRows<T extends { snippet?: string | null; sender?: string | null; recipient?: string | null }>(rows: T[]): T[] {
+	return rows.map((e) =>
+		e ? ({ ...e, ...(e.snippet ? { snippet: cleanSnippet(e.snippet) } : {}), from: e.sender, to: e.recipient }) : e,
+	);
+}
+
 app.get("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const folder = c.req.query("folder");
 	const thread_id = c.req.query("thread_id");
@@ -343,31 +356,17 @@ app.get("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const sortDirection = c.req.query("sortDirection") as "ASC" | "DESC" | undefined;
 	const stub = c.var.mailboxStub;
 
-	// The DO computes snippet as SUBSTR(body,1,300) = raw HTML for HTML mail, so
-	// a UI/agent using it as a preview sees literal tags. Strip to plain text
-	// (dogfood: Duoyu). body_text elsewhere is already stripped.
-	//
-	// SUBSTR can also cut mid-tag, leaving a DANGLING open tag at the end
-	// (`…<img class="s`) that the complete-tag stripper (`<[^>]+>`) can't match, so
-	// the fragment survives (AX: Yingjun). Drop a trailing incomplete `<…` (no
-	// closing `>` before end) BEFORE stripping. Scoped to the snippet preview — we
-	// deliberately do NOT do this in stripHtmlToText, which must not clip a
-	// legitimate trailing `<` in full body_text. Interim: the durable fix persists
-	// a stripped snippet column at ingest (Gogo, DO — schema thread pending).
-	const stripSnippets = <T extends { snippet?: string | null }>(rows: T[]): T[] =>
-		rows.map((e) => (e && e.snippet ? { ...e, snippet: cleanSnippet(e.snippet) } : e));
-
 	if (threaded && folder) {
 		const emails = await (stub as any).getThreadedEmails({ folder, page, limit });
 		const totalCount = await (stub as any).countThreadedEmails(folder);
-		return c.json({ emails: stripSnippets(emails), totalCount });
+		return c.json({ emails: canonicalRows(emails), totalCount });
 	}
 	const emails = await stub.getEmails({ folder, thread_id, page, limit, sortColumn, sortDirection });
 	if (folder) {
 		const totalCount = await stub.countEmails({ folder, thread_id });
-		return c.json({ emails: stripSnippets(emails), totalCount });
+		return c.json({ emails: canonicalRows(emails), totalCount });
 	}
-	return c.json(stripSnippets(emails));
+	return c.json(canonicalRows(emails));
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
@@ -594,7 +593,7 @@ app.get("/api/v1/mailboxes/:mailboxId/search", async (c: AppContext) => {
 	const stub = c.var.mailboxStub as any;
 	const emails = await stub.searchEmails({ ...searchOpts, page: intQuery(c, "page"), limit: intQuery(c, "limit") });
 	const totalCount = await stub.countSearchResults(searchOpts);
-	return c.json({ emails, totalCount });
+	return c.json({ emails: canonicalRows(emails), totalCount });
 });
 
 // -- Attachments ----------------------------------------------------

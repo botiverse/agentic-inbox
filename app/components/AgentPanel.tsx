@@ -432,12 +432,12 @@ function AgentChatConnected({
 											const draftEmail = {
 												id: draftData.id || "",
 												subject: draftData.subject || "",
-												sender: mailboxId,
-												recipient: draftData.to || "",
+												from: mailboxId,
+												to: draftData.to || "",
 												date: new Date().toISOString(),
 												read: true,
 												starred: false,
-												body: draftData.body || "",
+												body_html: draftData.body || "",
 											};
 											startCompose({
 												mode: "reply",
