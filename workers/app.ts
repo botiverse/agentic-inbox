@@ -11,10 +11,77 @@ import { EmailMCP } from "./mcp";
 import { resolveKey } from "./lib/keyRegistry";
 import type { MailboxContext } from "./lib/mailbox";
 import type { Env } from "./types";
+import { BUILD_SHA, BUILD_TIME } from "./version";
+import {
+	openSession,
+	sealSession,
+	sessionCookie,
+	newLoginState,
+	loginStateCookie,
+	readLoginState,
+	clearLoginStateCookie,
+	loginStatesMatch,
+} from "./lib/session";
+import {
+	type RaftOAuthConfig,
+	RaftAuthError,
+	exchangeAuthorizationCode,
+	exchangeAgentRequest,
+	fetchUserinfo,
+	validateRaftPrincipal,
+	ownerFromPrincipal,
+	raftSetupUrl,
+} from "./lib/raftAuth";
+
+const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8h
+const LOGIN_STATE_TTL_SECONDS = 600; // 10min
+
+/** True when Login-with-Raft is configured (mail.build): all four env pieces present. */
+function raftLoginConfigured(env: Env): boolean {
+	return Boolean(env.RAFT_API_ORIGIN && env.RAFT_APP_ORIGIN && env.RAFT_OAUTH_CLIENT_KEY && env.RAFT_OAUTH_CLIENT_SECRET && env.RAFT_SESSION_SECRET);
+}
+
+/** Read the Login-with-Raft OAuth config from env (call only when raftLoginConfigured). */
+function readRaftConfig(env: Env): RaftOAuthConfig {
+	return {
+		apiOrigin: (env.RAFT_API_ORIGIN ?? "").replace(/\/+$/, ""),
+		appOrigin: (env.RAFT_APP_ORIGIN ?? "").replace(/\/+$/, ""),
+		clientKey: env.RAFT_OAUTH_CLIENT_KEY ?? "",
+		clientSecret: env.RAFT_OAUTH_CLIENT_SECRET ?? "",
+		allowedServerIds: (env.ALLOWED_SERVER_IDS ?? "").split(/[,\s]+/).map((s) => s.trim()).filter(Boolean),
+	};
+}
+
+/** A request that should get an HTML redirect (browser nav) vs a JSON 401 (api/programmatic). */
+function wantsHtmlRedirect(request: Request): boolean {
+	const path = new URL(request.url).pathname;
+	if (path.startsWith("/api/") || path.startsWith("/mcp")) return false;
+	return (request.headers.get("Accept") ?? "").includes("text/html");
+}
+
+/** Paths that must never be gated by the auth middleware: the login flow and the
+ * public agent-behavior manifest (the Raft integration CLI fetches it anonymously). */
+function isAuthExemptPath(pathname: string): boolean {
+	return (
+		pathname.startsWith("/auth/raft/") ||
+		pathname === "/auth/callback" ||
+		pathname === "/.well-known/raft-agent-manifest.json" ||
+		pathname === "/health"
+	);
+}
+
+/** mail.build's public landing page for signed-out visitors — product intro + a
+ * "Login with Raft" call to action (instead of bouncing straight into OAuth).
+ * `loginHref` already carries the `next` param so login returns them where they
+ * were headed. Self-contained (inline styles) so it needs no SPA/assets. */
+function landingHtml(loginHref: string): string {
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mail.build — email for humans and agents</title><style>:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#fafafa;color:#111}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}.card{max-width:460px;width:100%;text-align:center}.logo{font-size:15px;letter-spacing:.02em;color:#666;margin-bottom:28px}h1{font-size:34px;line-height:1.15;margin:0 0 14px;font-weight:700}p{font-size:16px;line-height:1.55;color:#444;margin:0 0 28px}.btn{display:inline-flex;align-items:center;gap:8px;background:#111;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:12px 22px;border-radius:10px}.btn:hover{background:#000}.foot{margin-top:22px;font-size:13px;color:#999}</style></head><body><div class="wrap"><div class="card"><div class="logo">✉️ mail.build</div><h1>Email for humans and agents.</h1><p>One inbox, two audiences — a mail client people use and agents can drive over a clean API. Sign in with your Raft account to claim a mailbox and start sending and receiving.</p><a class="btn" href="${loginHref}">Login with Raft &rarr;</a><div class="foot">Botiverse members only.</div></div></div></body></html>`;
+}
 
 export { MailboxDO } from "./durableObject";
 export { EmailAgent } from "./agent";
 export { EmailMCP } from "./mcp";
+export { OwnerDO } from "./ownerDO";
 
 declare module "react-router" {
 	export interface AppLoadContext {
@@ -45,6 +112,18 @@ function getAccessUrls(teamDomain: string) {
 // MailboxContext so the auth middleware can set authOwner/authScope for the
 // mounted API routes to read.
 const app = new Hono<MailboxContext>();
+// Stamp the deployed build SHA on every response so the running version is
+// observable (header is grep-friendly for monitoring; /health exposes it as JSON).
+// A bare `wrangler deploy` that shipped a stale bundle would show the old SHA here.
+app.use("*", async (c, next) => {
+	await next();
+	c.header("X-Agentic-Inbox-Version", BUILD_SHA);
+});
+// Liveness + version probe (public, auth-exempt) — monitoring asserts the running
+// `version` equals the expected deployed SHA, catching stale deploys automatically.
+app.get("/health", (c) =>
+	c.json({ status: "ok", version: BUILD_SHA, build_time: BUILD_TIME }),
+);
 // Cloudflare Access JWT validation middleware (production only)
 app.use("*", async (c, next) => {
 	// Skip validation in development
@@ -52,9 +131,15 @@ app.use("*", async (c, next) => {
 		return next();
 	}
 
+	// Login-flow endpoints establish identity; they must never be auth-gated.
+	const path = new URL(c.req.url).pathname;
+	if (isAuthExemptPath(path)) {
+		return next();
+	}
+
 	const bearer = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "");
 
-	// Per-agent scoped key (KV registry): resolve owner + scope for authz.
+	// 1. Per-agent scoped key (Bearer) — programmatic agent access.
 	if (bearer) {
 		const key = await resolveKey(c.env, bearer);
 		if (key) {
@@ -65,9 +150,23 @@ app.use("*", async (c, next) => {
 		}
 	}
 
-	// Legacy global API_KEY — temporary admin fallback for already-distributed
-	// holders during cutover (feature seam; removed once all consumers hold KV
-	// keys). See notes/design-per-agent-auth.md resolution #2.
+	// 2. Login-with-Raft session (cookie) — human or agent signed in via OAuth.
+	//    The server allow-list (botiverse-only) was enforced ONCE at login in
+	//    validateRaftPrincipal; a sealed session is proof of that, so we trust the
+	//    owner here and do NOT re-check the server per request.
+	if (c.env.RAFT_SESSION_SECRET) {
+		const session = await openSession(c.req.raw, c.env.RAFT_SESSION_SECRET);
+		if (session) {
+			c.set("authOwner", ownerFromPrincipal(session.principal));
+			c.set("authScope", "account");
+			c.set("authIsAdmin", false);
+			if (session.principal.preferredUsername) c.set("authHandle", session.principal.preferredUsername);
+			return next();
+		}
+	}
+
+	// 3. Legacy global API_KEY — temporary admin fallback during cutover (removed
+	//    once all consumers hold scoped keys). See notes/design-per-agent-auth.md #2.
 	const apiKey = c.env.API_KEY;
 	if (apiKey && bearer === apiKey) {
 		c.set("authOwner", "local:admin");
@@ -76,44 +175,223 @@ app.use("*", async (c, next) => {
 		return next();
 	}
 
-	const { POLICY_AUD, TEAM_DOMAIN } = c.env;
+	// 4a. No identity, Login-with-Raft configured (mail.build): raft-login is the
+	//     gate. JSON 401 for api/programmatic; browsers get the landing page (with a
+	//     "Login with Raft" CTA) instead of bouncing straight into OAuth (tygg).
+	if (raftLoginConfigured(c.env)) {
+		if (wantsHtmlRedirect(c.req.raw)) {
+			const nextParam = encodeURIComponent(path + new URL(c.req.url).search);
+			return c.html(landingHtml(`/auth/raft/login?next=${nextParam}`), 200, { "Cache-Control": "no-store" });
+		}
+		return c.json({ error: "Authentication required" }, 401);
+	}
 
-	// Fail closed in production if Access is not configured.
+	// 4b. Legacy Cloudflare Access gate (workers.dev) — only active when configured
+	//     and raft-login is not. Inert on mail.build (POLICY_AUD/TEAM_DOMAIN unset).
+	const { POLICY_AUD, TEAM_DOMAIN } = c.env;
 	if (!POLICY_AUD || !TEAM_DOMAIN) {
 		return c.text(
-			"Cloudflare Access must be configured in production. Set POLICY_AUD and TEAM_DOMAIN.",
+			"Auth not configured: set Login-with-Raft (RAFT_*) or Cloudflare Access (POLICY_AUD/TEAM_DOMAIN).",
 			500,
 		);
 	}
-
 	const token = c.req.header("cf-access-jwt-assertion");
 	if (!token) {
 		return c.text("Missing required CF Access JWT", 403);
 	}
-
 	try {
 		const { issuer, certsUrl } = getAccessUrls(TEAM_DOMAIN);
 		const JWKS = createRemoteJWKSet(certsUrl);
-		await jwtVerify(token, JWKS, {
-			issuer,
-			audience: POLICY_AUD,
-		});
+		await jwtVerify(token, JWKS, { issuer, audience: POLICY_AUD });
 	} catch {
 		return c.text("Invalid or expired Access token", 403);
 	}
-
-	// Authorization model note: once a teammate passes the shared Cloudflare
-	// Access policy, they can access all mailboxes in this app by design.
+	// Authorization model note: once a teammate passes the shared Cloudflare Access
+	// policy, they can access all mailboxes in this app by design.
 	return next();
+});
+
+// ── Agent-behavior manifest (public; the Raft integration CLI fetches it) ─────
+// Describes the login-with-raft auth + the HTTP API actions agents can call.
+// Origins are derived from the request so the same route is valid on both the
+// workers.dev interim URL and mail.build.
+app.get("/.well-known/raft-agent-manifest.json", (c) => {
+	const origin = new URL(c.req.url).origin;
+	return c.json(
+		{
+			schema: "raft-agent-manifest.v0",
+			name: "Agentic Inbox",
+			description: "Per-agent email inbox on mail.build. Login with Raft, claim a mailbox under your handle, then RECEIVE and READ email. v0 is inbound-only: there is no send/reply action yet (well-suited to receiving verification codes / links). Claiming an existing ownerless mailbox under your handle adopts it.",
+			service: "agentic-inbox",
+			app_origin: origin,
+			docs_url: "https://docs.raft.build/developers/login-with-raft/",
+			execution: { mode: "http_api", base_url: origin },
+			auth: { type: "login_with_raft", login_url: `${origin}/auth/raft/login` },
+			// A cheap authenticated call that returns the caller's own mailboxes = context.
+			context_check: { url: `${origin}/api/v1/mailboxes`, method: "GET" },
+			actions: [
+				{
+					name: "claim-mailbox",
+					description: "Claim a mailbox. REQUIRED body: {email, name}. `email` = the full address `<yourhandle>@mail.build` (local-part must be ASCII and under your own handle namespace — `<handle>@` or `<handle>-*@`, e.g. `postel@mail.build` or `postel-ci@mail.build`); `name` = a display name. If your handle is non-ASCII (e.g. CJK), you cannot use it directly in an address — claim under your DERIVED namespace instead; the 400/403 error returns your exact claimable `namespace` (an `a-<hash>@mail.build`). If the address already exists but is ownerless it is adopted (you become the owner). Returns a mailbox-scoped access key + its `keyId` (use keyId to revoke), shown once — raft-native (integration) calls authenticate via your stored session and do NOT need this key.",
+					endpoint: { method: "POST", path: "/api/v1/mailboxes" },
+					body: {
+						email: "string (required) — the address to claim, e.g. <handle>@mail.build",
+						name: "string (required) — display name for the mailbox",
+					},
+				},
+				{
+					name: "list-mailboxes",
+					description: "List the mailboxes you own.",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes" },
+				},
+				{
+					name: "list-emails",
+					description: "List emails in one of your mailboxes. Optional query params: folder, thread_id, page, limit. Rows are lightweight (subject/sender/recipient/date/snippet/read/thread_id…) with a plain-text `snippet` but NOT the full body — call get-email for body_text/body_html.",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails" },
+				},
+				{
+					name: "get-email",
+					description: "Read a single email in one of your mailboxes. Path params: {mailboxId} + {emailId} (the email id from list-emails). Returns a LEAN structured (not raw MIME) object by default: from, to, cc, bcc, subject, date, read, body_text (HTML stripped to plain — safe to grep for codes/links), body_html (null when there was no HTML part), snippet. `raw_headers` is large and opt-in to save tokens: add query `?include=raw_headers`.",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails/{emailId}" },
+				},
+				{
+					name: "release-mailbox",
+					description: "Release (delete) a mailbox you own, freeing the quota slot so you can claim another. Use this to clean up throwaway / verification mailboxes.",
+					endpoint: { method: "DELETE", path: "/api/v1/mailboxes/{mailboxId}" },
+				},
+				{
+					name: "rotate-mailbox-key",
+					description: "Rotate the access key for a mailbox you own: mints a fresh key (returned ONCE in `key`, with `key_guidance`) and invalidates the previous one. Use this if a key is lost or leaked. Note: raft-native calls don't need the key at all (stored session).",
+					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/keys/rotate" },
+				},
+				{
+					name: "list-mailbox-keys",
+					description: "List key metadata for a mailbox you own (id / scope / label / createdAt / disabled) — never the raw key. Use the id with revoke.",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/keys" },
+				},
+				{
+					name: "revoke-mailbox-key",
+					description: "Revoke a specific key of a mailbox you own (by the id from list-mailbox-keys).",
+					endpoint: { method: "DELETE", path: "/api/v1/mailboxes/{mailboxId}/keys/{keyId}" },
+				},
+				{
+					name: "send-mail",
+					description: "Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service. REQUIRED body: {to, subject, text} (or `html`). v0 is internal-only (agent-to-agent within the configured domain; the recipient mailbox must already exist → else 404). ONLY to/subject/text/html are honored — any other field (in_reply_to, attachments, cc, …) is REJECTED with 400 `UNSUPPORTED_FIELD` (no threading/attachments yet), so a 202 always means exactly what you sent was delivered.",
+					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/send" },
+					body: {
+						to: "string (required) — recipient address on a configured domain, e.g. someone@mail.build",
+						subject: "string — subject line",
+						text: "string — plain-text body (use THIS for a plain message; the field is `text`, not `body`)",
+						html: "string (optional) — HTML body; if given it takes precedence over text",
+					},
+				},
+			],
+			// Every 4xx from an action is a structured body { error, code, ... } with
+			// the right HTTP status. Read `code` to decide what to do — do NOT blanket
+			// re-login: only a BARE auth-layer 401/403 with no `code` means the session
+			// expired. None of the codes below are fixed by re-login.
+			errors: {
+				AUTH_REQUIRED: "401 — not authenticated; log in",
+				BAD_REQUEST: "400 — malformed body / missing field; fix the request",
+				ADDRESS_NOT_ALLOWED: "403 — address not under a configured domain",
+				NAMESPACE_FORBIDDEN: "403 — claim outside your namespace; the response `namespace` field is the address prefix you CAN claim (<namespace>@ or <namespace>-*)",
+				INVALID_LOCALPART: "400 — local-part isn't ASCII (e.g. a non-ASCII handle); the response `namespace` field gives your derived claimable address",
+				QUOTA_EXCEEDED: "403 — plan mailbox limit reached (free=1, pro=10); release one or upgrade",
+				MAILBOX_TAKEN: "409 — address owned by another account; pick another",
+				MAILBOX_NOT_LINKED: "403 — mailbox is ownerless; claim it first (adopts it)",
+				FORBIDDEN: "403 — mailbox owned by another account; use one you own",
+				NOT_FOUND: "404 — mailbox/email does not exist",
+				SEND_EXTERNAL_UNSUPPORTED: "400 — v0 send is internal-only (recipient must be @a-configured-domain)",
+				RATE_LIMITED: "429 — send rate limit hit; back off and retry",
+			},
+		},
+		200,
+		{ "Cache-Control": "public, max-age=300" },
+	);
+});
+
+// ── Login-with-Raft OAuth routes (exempt from the auth middleware above) ──────
+// Browser (human) flow uses CSRF state + authorization_code; agent CLI flow uses
+// the agent_request grant with state forbidden. Both seal a session cookie that the
+// middleware maps to authOwner/authScope/authHandle.
+app.get("/auth/raft/login", async (c) => {
+	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
+	const config = readRaftConfig(c.env);
+	const state = newLoginState();
+	const callbackUrl = new URL("/auth/raft/callback", c.req.url);
+	// Force https so the callback matches the registered redirect (registered as
+	// https://). A request that arrived over http — e.g. a user typing
+	// `http://mail.build` — would otherwise build an http:// callback and raft
+	// rejects it: "returnUrl does not match registered OAuth client" (dogfood: tygg).
+	// Keep http for local dev (localhost).
+	if (callbackUrl.hostname !== "localhost" && callbackUrl.hostname !== "127.0.0.1") {
+		callbackUrl.protocol = "https:";
+	}
+	const location = raftSetupUrl(config, callbackUrl.toString(), state);
+	c.header("Set-Cookie", loginStateCookie(c.req.raw, state, LOGIN_STATE_TTL_SECONDS));
+	c.header("Cache-Control", "no-store");
+	return c.redirect(location, 302);
+});
+
+app.all("/auth/raft/callback", async (c) => {
+	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
+	const config = readRaftConfig(c.env);
+	const url = new URL(c.req.url);
+	const code = url.searchParams.get("code") ?? "";
+	const presentedState = url.searchParams.get("state");
+	const expectedState = readLoginState(c.req.raw);
+	// Browser flow iff a state is present on either side; agent flow otherwise.
+	const browserFlow = presentedState !== null || expectedState !== null;
+	try {
+		let token;
+		if (browserFlow) {
+			// CSRF: presented state must match the cookie state (constant-time).
+			if (!presentedState || !expectedState || !(await loginStatesMatch(presentedState, expectedState))) {
+				throw new RaftAuthError("RAFT_STATE_MISMATCH", "token_exchange_failed", 400);
+			}
+			token = await exchangeAuthorizationCode(config, code, url.toString().split("?")[0]);
+		} else {
+			// Agent flow: `code` carries the agent request id; state must be absent.
+			token = await exchangeAgentRequest(config, code);
+		}
+		const userinfo = await fetchUserinfo(config, token.access_token);
+		const principal = validateRaftPrincipal(userinfo, config);
+		const ttl = Math.max(1, Math.min(typeof token.expires_in === "number" ? token.expires_in : SESSION_TTL_SECONDS, SESSION_TTL_SECONDS));
+		const sealed = await sealSession({ principal, expiresAt: Date.now() + ttl * 1000 }, c.env.RAFT_SESSION_SECRET as string);
+		// Two Set-Cookie headers (session + clear login-state) MUST both survive —
+		// use append (c.header replaces by default, which would drop the session cookie).
+		c.header("Set-Cookie", sessionCookie(c.req.raw, sealed, ttl), { append: true });
+		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw), { append: true });
+		c.header("Cache-Control", "no-store");
+		// Browser: bounce to `next` (validated same-origin) or home. Agent: 204.
+		if (browserFlow) {
+			const requested = url.searchParams.get("next") ?? "/";
+			const nextPath = requested.startsWith("/") && !requested.startsWith("//") ? requested : "/";
+			return c.redirect(nextPath, 302);
+		}
+		return c.body(null, 204);
+	} catch (err) {
+		const status = err instanceof RaftAuthError ? err.status : 403;
+		if (err instanceof RaftAuthError) console.warn("[raft-auth]", err.code, err.reason);
+		return c.json({ error: "Login could not be completed." }, status as 400 | 403 | 500, { "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" });
+	}
 });
 
 // MCP server endpoint — used by AI coding tools (ProtoAgent, Claude Code, Cursor, etc.)
 // Must be before API routes and React Router catch-all
 const mcpHandler = EmailMCP.serve("/mcp", { binding: "EMAIL_MCP" });
+// INTERIM SECURITY GATE: the MCP tools are not yet owner-scoped (verifyMailbox
+// only checks existence, list_mailboxes returns ALL), so any authenticated
+// non-admin caller could enumerate/read other tenants' mailboxes. Restrict /mcp
+// to admin until the per-tool owner-scoping rebuild lands (dogfood: Gogo). /mcp is
+// not advertised in the manifest and not in active agent use, so this is no-impact.
+const mcpAdminOnly = (isAdmin: unknown) => isAdmin === true;
 app.all("/mcp", async (c) => {
+	if (!mcpAdminOnly(c.get("authIsAdmin"))) return c.json({ error: "MCP is temporarily restricted while it is scoped to per-owner access.", code: "FORBIDDEN" }, 403);
 	return mcpHandler.fetch(c.req.raw, c.env, c.executionCtx as ExecutionContext);
 });
 app.all("/mcp/*", async (c) => {
+	if (!mcpAdminOnly(c.get("authIsAdmin"))) return c.json({ error: "MCP is temporarily restricted while it is scoped to per-owner access.", code: "FORBIDDEN" }, 403);
 	return mcpHandler.fetch(c.req.raw, c.env, c.executionCtx as ExecutionContext);
 });
 

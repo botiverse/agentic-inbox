@@ -172,11 +172,69 @@ export function isReservedSystemLocalPart(localPart: string): boolean {
  * `callerHandle` is the caller's raft `preferred_username`.
  * (Free / shared names outside your namespace are a fast-follow.)
  */
+/** A valid ASCII email local-part (mail.build only issues ASCII addresses). */
+export function isValidAsciiLocalPart(localPart: string): boolean {
+	return /^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$/.test(localPart.toLowerCase());
+}
+
+/**
+ * The ASCII namespace an owner may claim mailboxes under. An ASCII-usable handle
+ * keeps its own name (unchanged behaviour). A handle containing ANY non-ASCII
+ * char — which could never anchor an ASCII email local-part — would otherwise be
+ * fully locked out of claiming (CJK addr → 400 Invalid email; ASCII addr → 403
+ * NAMESPACE_FORBIDDEN, a whole class of agents with no path). Such handles get a
+ * stable derived slug `a-<hash>` so they still have a claimable namespace.
+ * Deterministic (sync FNV-1a over the UTF-8 bytes) — uniqueness is first-come at
+ * claim time anyway, so the slug only needs to be stable + collision-unlikely.
+ * (AX: 跳虎 fresh-agent dogfood — non-ASCII handle couldn't claim anything.)
+ */
+export function asciiNamespaceForHandle(handle: string): string {
+	const h = (handle || "").toLowerCase();
+	if (!h) return ""; // no handle → no claim path (caller enforces 403)
+	if (isValidAsciiLocalPart(h)) return h;
+	const bytes = new TextEncoder().encode(h);
+	let hash = 0x811c9dc5;
+	for (const b of bytes) {
+		hash ^= b;
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return `a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
 export function claimAllowedForHandle(localPart: string, callerHandle: string): boolean {
 	const lp = localPart.toLowerCase();
-	if (!callerHandle) return false;
+	const ch = callerHandle.toLowerCase();
+	if (!ch) return false;
 	if (isReservedSystemLocalPart(lp)) return false;
-	return reservedHandleForLocalPart(lp) === callerHandle.toLowerCase();
+	// Anchor to the caller's FULL handle: the claimable namespace is `<handle>@`
+	// and `<handle>-*@`. The old check folded lp to its first hyphen-segment
+	// (reservedHandleForLocalPart) and compared that to the whole handle — so any
+	// caller whose handle ITSELF contains a hyphen (e.g. `gogo-signup-dogfood`,
+	// folded to `gogo`) could never match and could claim NOTHING. Agents never hit
+	// it (agent handles have no hyphen); found only on the human side (dogfood: Gogo).
+	return lp === ch || lp.startsWith(`${ch}-`);
+}
+
+export type ClaimAction = "create" | "adopt" | "idempotent" | "taken";
+/**
+ * Decide what a claim on an address should do, given the mailbox's current
+ * stored state. This is ONLY the ownership disposition — the namespace/anti-squat
+ * gate (`claimAllowedForHandle`) is enforced separately and must pass first.
+ * - not exists            → "create"  (fresh mailbox)
+ * - exists, owner == you   → "idempotent" (re-claim your own; no new key)
+ * - exists, owner == other → "taken" (409; belongs to someone else)
+ * - exists, no owner       → "adopt" (ownerless orphan, e.g. admin-provisioned
+ *   canonical `<handle>@` — take ownership instead of 409'ing)
+ */
+export function classifyClaim(
+	exists: boolean,
+	existingOwner: string | null | undefined,
+	owner: string,
+): ClaimAction {
+	if (!exists) return "create";
+	if (existingOwner && existingOwner === owner) return "idempotent";
+	if (existingOwner) return "taken";
+	return "adopt";
 }
 
 /**

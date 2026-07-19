@@ -18,15 +18,22 @@ async function postMailbox(body: unknown) {
 }
 
 describe("POST /api/v1/mailboxes — body validation", () => {
-	it("returns 400 (not 500) for a non-email `email`", async () => {
+	it("returns 400 (not 500) for a non-email `email` (bad shape, pre-auth)", async () => {
 		const res = await postMailbox({ email: "notanemail", name: "x" });
 		expect(res.status).toBe(400);
-		expect((await res.json() as { error: string }).error).toMatch(/invalid request body/i);
+		const body = await res.json() as { error: string; code: string };
+		expect(body.code).toBe("BAD_REQUEST");
+		expect(body.error).toMatch(/<local-part>@<domain>/);
 	});
 
-	it("returns 400 (not 500) for a non-ASCII / CJK local-part (EAI not yet supported)", async () => {
+	it("returns 400 with INVALID_LOCALPART for a non-ASCII / CJK local-part (EAI not yet supported)", async () => {
 		const res = await postMailbox({ email: "测试@mail.build", name: "x" });
 		expect(res.status).toBe(400);
+		const body = await res.json() as { error: string; code: string };
+		expect(body.code).toBe("INVALID_LOCALPART");
+		// Unauthenticated caller has no handle → no derived-namespace hint, but the
+		// ASCII rule is still stated clearly (the authenticated CJK path adds the hint).
+		expect(body.error).toMatch(/ASCII/);
 	});
 
 	it("returns 400 (not 500) for a missing `name`", async () => {

@@ -179,14 +179,44 @@ export function textToHtml(text: string): string {
  * Removes <style> and <script> blocks first to avoid injecting their
  * content into the output.
  */
+const NAMED_ENTITIES: Record<string, string> = {
+	amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
+	mdash: "—", ndash: "–", hellip: "…", copy: "©",
+	reg: "®", trade: "™", rsquo: "’", lsquo: "‘",
+	rdquo: "”", ldquo: "“", middot: "·", bull: "•",
+	laquo: "«", raquo: "»", deg: "°", euro: "€", pound: "£",
+};
+
+/** Decode HTML entities (named + numeric dec/hex). Each &...; token is decoded
+ * exactly once, so double-encoded text (e.g. `&amp;lt;`) stays literal (`&lt;`). */
+export function decodeHtmlEntities(s: string): string {
+	return s.replace(/&(#x?[0-9a-f]+|[a-z0-9]+);/gi, (match, ent: string) => {
+		if (ent[0] === "#") {
+			const code = ent[1] === "x" || ent[1] === "X"
+				? parseInt(ent.slice(2), 16)
+				: parseInt(ent.slice(1), 10);
+			if (Number.isFinite(code) && code > 0 && code <= 0x10ffff) {
+				try { return String.fromCodePoint(code); } catch { return match; }
+			}
+			return match;
+		}
+		const named = NAMED_ENTITIES[ent.toLowerCase()];
+		return named !== undefined ? named : match;
+	});
+}
+
 export function stripHtmlToText(html: string): string {
 	if (!html) return "";
-	return html
+	// Strip script/style (including their bodies) and tags, THEN decode entities —
+	// otherwise `body_text` keeps literal `&amp;`/`&nbsp;`/etc., which breaks
+	// grepping codes/links (dogfood: Duoyu/Maggie — e.g. a URL `…?a=1&amp;b=2`
+	// extracts as `…&amp;b=2` = broken; `AT&amp;T-1` misses a grep for `AT&T-1`).
+	// Decode after tag-stripping so decoded `<`/`>` can't reintroduce markup.
+	const stripped = html
 		.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
 		.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
-		.replace(/<[^>]+>/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
+		.replace(/<[^>]+>/g, " ");
+	return decodeHtmlEntities(stripped).replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -226,8 +256,22 @@ type MailboxThreadReaderStub = {
 };
 
 /**
+ * Whether a stored body actually contains HTML. The DO keeps a single `body`
+ * column that may hold either an HTML part or a plain-text part, so we detect
+ * real markup: a closing tag, or an opening tag of a known HTML element. A plain
+ * message that merely contains `<name>@host` must NOT count as HTML.
+ */
+export function looksLikeHtml(body: string): boolean {
+	return /<\/[a-z][a-z0-9]*\s*>|<(?:div|p|br|a|span|table|tr|td|th|thead|tbody|h[1-6]|strong|b|em|i|u|ul|ol|li|img|body|html|head|style|font|blockquote|hr|pre|code|small|center)\b/i.test(
+		body,
+	);
+}
+
+/**
  * Fetch a single email and return it with both HTML and plain-text body.
- * Returns null if the email is not found.
+ * `body_html` is null when the message has no HTML part (so callers can rely on
+ * `body_html === null` meaning "plain-text only"); `body_text` is always the
+ * HTML stripped to plain text. Returns null if the email is not found.
  */
 export async function getFullEmail(
 	stub: DurableObjectStub<MailboxDO>,
@@ -237,7 +281,17 @@ export async function getFullEmail(
 	if (!email) return null;
 
 	const textBody = email.body ? stripHtmlToText(email.body) : "";
-	return { ...email, body_text: textBody, body_html: email.body };
+	// SECURITY: body_html is the RAW stored body — it must NOT be entity-decoded.
+	// It is meant to be rendered; decoding a sender's escaped `&lt;script&gt;` back
+	// into a live `<script>` would inject XSS into the render path. Entity decoding
+	// (in stripHtmlToText) only ever runs on body_text/snippet, which are never
+	// rendered as HTML. Do not "simplify" this to reuse the decoded value.
+	// (dogfood: Duoyu.)
+	const bodyHtml = email.body && looksLikeHtml(email.body) ? email.body : null;
+	// getEmail's row has no snippet column (snippet is a list-query SUBSTR), so
+	// derive a plain-text preview here — get-email advertised snippet but returned
+	// none (dogfood: Duoyu).
+	return { ...email, body_text: textBody, body_html: bodyHtml, snippet: textBody.slice(0, 300) };
 }
 
 /**
@@ -263,4 +317,59 @@ export async function getFullThread(
 	);
 
 	return { thread_id: threadId, message_count: enriched.length, messages: enriched };
+}
+
+/**
+ * v0 send honors ONLY `to`/`subject`/`text`/`html`. Returns the list of
+ * unsupported body fields (empty = OK to send). Two dogfood findings shaped this:
+ *  - HuangSong: a meaningful unsupported field (in_reply_to/attachments/cc/…)
+ *    must be rejected LOUD, never silently dropped while returning 202.
+ *  - 跳虎: the `raft integration invoke` CLI merges a POST action's PATH param
+ *    into the request BODY, so send-mail arrives with a redundant `mailboxId`
+ *    that equals the path. That's a harmless plumbing echo, not meaningful data
+ *    loss — tolerate it (Postel's law) when it matches `pathMailbox`; a
+ *    `mailboxId` that DIFFERS from the path is still reported (guards misrouting).
+ */
+export function unsupportedSendFields(
+	body: Record<string, unknown>,
+	pathMailbox: string,
+): string[] {
+	const SUPPORTED = new Set(["to", "subject", "text", "html"]);
+	return Object.keys(body).filter((k) => {
+		if (SUPPORTED.has(k)) return false;
+		if (k === "mailboxId" && String(body[k]).toLowerCase() === pathMailbox.toLowerCase()) return false;
+		return true;
+	});
+}
+
+/**
+ * Build a clean plain-text snippet preview from a raw (possibly HTML) body prefix.
+ * The list query passes `SUBSTR(body,1,N)`, which can cut mid-tag and leave a
+ * dangling open tag (`…<img class="s`) that the complete-tag stripper can't
+ * remove — so drop a trailing incomplete `<…` (no closing `>` before end) first,
+ * THEN strip tags/entities, THEN truncate. Scoped to snippets on purpose: we do
+ * NOT clip trailing `<` in full body_text. (AX: Yingjun — snippet fragments.)
+ * Gogo's durable fix persists this at ingest; this is the shared strip semantic.
+ */
+export function cleanSnippet(raw: string | null | undefined, maxLen = 300): string {
+	if (!raw) return "";
+	return stripHtmlToText(raw.replace(/<[^>]*$/, "")).slice(0, maxLen);
+}
+
+/**
+ * Canonical snippet from a FULL body, for the durable ingest column (Gogo's DO
+ * write path) and the self-healing read-write-back. Semantics pinned with Gogo:
+ * strip via the same primitive as body_text (so the snippet is by construction a
+ * prefix of body_text — zero list-vs-ingest drift), truncate on the last
+ * whitespace ≤ maxLen (no ellipsis), and hard-cut at maxLen when the first
+ * maxLen chars have no whitespace (a long URL/token) rather than returning empty.
+ * The full body has complete tags, so no dangling-tag handling is needed here —
+ * that (cleanSnippet) is only for the pre-truncated SUBSTR fallback. (AX: Yingjun.)
+ */
+export function snippetFromFullBody(body: string | null | undefined, maxLen = 300): string {
+	const text = stripHtmlToText(body || "");
+	if (text.length <= maxLen) return text;
+	const slice = text.slice(0, maxLen);
+	const lastWs = slice.lastIndexOf(" ");
+	return lastWs > 0 ? slice.slice(0, lastWs) : slice;
 }

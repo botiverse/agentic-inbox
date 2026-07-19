@@ -77,7 +77,7 @@ export default function EmailPanel({ emailId }: { emailId: string }) {
 
 	const lastReceivedMessage = useMemo(() => {
 		const ce = currentMailbox?.email;
-		const received = allMessages.filter((msg) => !draftMessageIds.has(msg.id) && msg.sender !== ce);
+		const received = allMessages.filter((msg) => !draftMessageIds.has(msg.id) && msg.from !== ce);
 		if (received.length > 0) return received[0];
 		const nonDrafts = allMessages.filter((msg) => !draftMessageIds.has(msg.id));
 		return nonDrafts.length > 0 ? nonDrafts[0] : email;
@@ -111,9 +111,9 @@ export default function EmailPanel({ emailId }: { emailId: string }) {
 		if (!mailboxId || !currentMailbox) return;
 		setIsSending(true);
 		try {
-			if (!target.recipient || !target.subject) { try { const fresh = await api.getEmail(mailboxId, target.id) as Email; if (fresh) target = fresh; } catch {} }
-			if (!target.recipient) { toastManager.add({ title: "Cannot send: no recipient set on this draft.", variant: "error" }); return; }
-			const toRecipients = splitEmailList(target.recipient);
+			if (!target.to || !target.subject) { try { const fresh = await api.getEmail(mailboxId, target.id) as Email; if (fresh) target = fresh; } catch {} }
+			if (!target.to) { toastManager.add({ title: "Cannot send: no recipient set on this draft.", variant: "error" }); return; }
+			const toRecipients = splitEmailList(target.to);
 			if (toRecipients.length === 0) { toastManager.add({ title: "Cannot send: no valid recipient set on this draft.", variant: "error" }); return; }
 			const fromName = currentMailbox.settings?.fromName || currentMailbox.name;
 			const from = fromName && fromName !== currentMailbox.email ? { email: currentMailbox.email, name: fromName } : currentMailbox.email;
@@ -124,8 +124,8 @@ export default function EmailPanel({ emailId }: { emailId: string }) {
 				bcc: toEmailListValue(splitEmailList(target.bcc)),
 				from,
 				subject: target.subject || "(no subject)",
-				html: target.body || "",
-				text: target.body ? target.body.replace(/<[^>]*>/g, "").trim() : "",
+				html: target.body_html || "",
+				text: target.body_text || "",
 			};
 			if (originalEmail) await replyMut.mutateAsync({ mailboxId, emailId: originalEmail.id, email: emailData }); else await sendEmailMut.mutateAsync({ mailboxId, email: emailData });
 			await deleteEmailMut.mutateAsync({ mailboxId, id: target.id });

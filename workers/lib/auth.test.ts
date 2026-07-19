@@ -14,6 +14,9 @@ import {
 	serverAllowed,
 	claimAllowedForHandle,
 	isReservedSystemLocalPart,
+	classifyClaim,
+	asciiNamespaceForHandle,
+	isValidAsciiLocalPart,
 } from "./auth";
 
 describe("hashApiKey", () => {
@@ -154,10 +157,80 @@ describe("claimAllowedForHandle (v0 anti-squat)", () => {
 	it("requires a caller handle", () => {
 		expect(claimAllowedForHandle("postel", "")).toBe(false);
 	});
+	it("allows a HYPHENATED handle to claim its own namespace (dogfood: Gogo, human-side)", () => {
+		// Regression: the old fold-to-first-segment check made any hyphenated handle
+		// unable to claim ANYTHING (gogo-signup-dogfood folded to gogo != full handle).
+		expect(claimAllowedForHandle("gogo-signup-dogfood", "gogo-signup-dogfood")).toBe(true);
+		expect(claimAllowedForHandle("gogo-signup-dogfood-notes", "gogo-signup-dogfood")).toBe(true);
+		expect(claimAllowedForHandle("Gogo-Signup-Dogfood", "gogo-signup-dogfood")).toBe(true);
+	});
+	it("a hyphenated handle still can't claim a different (shorter) handle's bare name", () => {
+		expect(claimAllowedForHandle("gogo", "gogo-signup-dogfood")).toBe(false);
+		expect(claimAllowedForHandle("gogo-ci", "gogo-signup-dogfood")).toBe(false);
+	});
 	it("isReservedSystemLocalPart flags infra names, case-insensitive", () => {
 		expect(isReservedSystemLocalPart("NoReply")).toBe(true);
 		expect(isReservedSystemLocalPart("mailer-daemon")).toBe(true);
 		expect(isReservedSystemLocalPart("postel")).toBe(false);
+	});
+});
+
+describe("asciiNamespaceForHandle (non-ASCII handle unlock — AX: 跳虎)", () => {
+	it("returns an ASCII handle unchanged (lowercased)", () => {
+		expect(asciiNamespaceForHandle("postel")).toBe("postel");
+		expect(asciiNamespaceForHandle("Gogo-Signup-Dogfood")).toBe("gogo-signup-dogfood");
+	});
+	it("derives a stable `a-<hash>` slug for a non-ASCII handle", () => {
+		const ns = asciiNamespaceForHandle("跳虎");
+		expect(ns).toMatch(/^a-[0-9a-f]{8}$/);
+		expect(asciiNamespaceForHandle("跳虎")).toBe(ns); // deterministic
+	});
+	it("distinct non-ASCII handles get distinct namespaces (no collision squat)", () => {
+		expect(asciiNamespaceForHandle("跳虎")).not.toBe(asciiNamespaceForHandle("老虎"));
+	});
+	it("the derived namespace is itself claimable by that handle", () => {
+		const ns = asciiNamespaceForHandle("跳虎");
+		expect(claimAllowedForHandle(ns, ns)).toBe(true); // a-xxxx@
+		expect(claimAllowedForHandle(`${ns}-notes`, ns)).toBe(true); // a-xxxx-notes@
+		expect(claimAllowedForHandle("tiaohu", ns)).toBe(false); // arbitrary ASCII still blocked
+	});
+	it("empty handle yields empty namespace (no claim path — handled as 403 upstream)", () => {
+		expect(asciiNamespaceForHandle("")).toBe("");
+	});
+});
+
+describe("isValidAsciiLocalPart", () => {
+	it("accepts valid ASCII local-parts", () => {
+		expect(isValidAsciiLocalPart("postel")).toBe(true);
+		expect(isValidAsciiLocalPart("a-3f9c2b1e")).toBe(true);
+		expect(isValidAsciiLocalPart("bob.smith_1")).toBe(true);
+	});
+	it("rejects non-ASCII and malformed local-parts", () => {
+		expect(isValidAsciiLocalPart("跳虎")).toBe(false);
+		expect(isValidAsciiLocalPart("-lead")).toBe(false);
+		expect(isValidAsciiLocalPart("trail-")).toBe(false);
+		expect(isValidAsciiLocalPart("")).toBe(false);
+	});
+});
+
+describe("classifyClaim (adopt-on-claim disposition)", () => {
+	const me = "raft:s1:agent:me";
+	const other = "raft:s1:agent:other";
+	it("creates when the mailbox does not exist", () => {
+		expect(classifyClaim(false, null, me)).toBe("create");
+		expect(classifyClaim(false, undefined, me)).toBe("create");
+	});
+	it("is idempotent when you already own it", () => {
+		expect(classifyClaim(true, me, me)).toBe("idempotent");
+	});
+	it("is taken when someone else owns it", () => {
+		expect(classifyClaim(true, other, me)).toBe("taken");
+	});
+	it("adopts an ownerless (orphan) mailbox", () => {
+		// The 7/13 admin-provisioned canonical <handle>@ addresses: exist, no owner.
+		expect(classifyClaim(true, null, me)).toBe("adopt");
+		expect(classifyClaim(true, undefined, me)).toBe("adopt");
+		expect(classifyClaim(true, "", me)).toBe("adopt");
 	});
 });
 

@@ -17,12 +17,17 @@
 		// Per-agent auth (task #1). PRO_SERVER_IDS = comma-separated raft server_ids
 		// on the pro tier (pro=10 mailboxes/agent, free=1). RAFT_OAUTH_* = Login with
 		// Raft Connected App; CLIENT_SECRET is set via `wrangler secret`, not here.
-		"PRO_SERVER_IDS": "",
+		"PRO_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
 		// Login gated to these raft server_ids (v0: botiverse-only, tygg 2026-07-15).
 		// Empty = unrestricted. Enforce in the OAuth callback via serverAllowed().
 		"ALLOWED_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
-		"RAFT_OAUTH_CLIENT_ID": "",
-		"RAFT_OAUTH_ISSUER": "",
+		// RAFT_OAUTH_CLIENT_KEY = the PUBLIC Connected-App client key (e.g. "agentic-inbox").
+		// Used for BOTH the setup client_id AND token-endpoint Basic auth — NEVER the
+		// internal app UUID (that mismatch was the slock-internal-dashboard PR #66 403).
+		// RAFT_OAUTH_CLIENT_SECRET + RAFT_SESSION_SECRET are wrangler secrets (not here).
+		"RAFT_OAUTH_CLIENT_KEY": "agentic-inbox",
+		"RAFT_API_ORIGIN": "https://api.raft.build",
+		"RAFT_APP_ORIGIN": "https://app.raft.build",
 		"EMAIL_ADDRESSES": [
 			"gogo@mail.build",
 			"ray@mail.build",
@@ -190,6 +195,10 @@
 			{
 				"name": "EMAIL_MCP",
 				"class_name": "EmailMCP"
+			},
+			{
+				"name": "OWNER",
+				"class_name": "OwnerDO"
 			}
 		]
 	},
@@ -210,6 +219,12 @@
 			"tag": "v3",
 			"new_sqlite_classes": [
 				"EmailMCP"
+			]
+		},
+		{
+			"tag": "v4",
+			"new_sqlite_classes": [
+				"OwnerDO"
 			]
 		}
 	]

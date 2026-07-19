@@ -31,14 +31,14 @@ export type MailboxContext = {
 
 export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) => {
 	const rawId = c.req.param("mailboxId");
-	if (!rawId) return c.json({ error: "Mailbox ID required" }, 400);
+	if (!rawId) return c.json({ error: "Mailbox ID required", code: "BAD_REQUEST" }, 400);
 	const mailboxId = decodeURIComponent(rawId);
 
 	// Verify mailbox exists (GET so we can read its owner for authorization).
 	const key = `mailboxes/${mailboxId}.json`;
 	const obj = await c.env.BUCKET.get(key);
 	if (!obj) {
-		return c.json({ error: "Not found" }, 404);
+		return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	}
 
 	// Owner-scoped access: enforce for scoped-key callers. Legacy callers (CF
@@ -50,7 +50,16 @@ export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) =
 			{ owner: c.get("authOwner") ?? "", scope: authScope },
 			{ id: mailboxId, owner: settings.owner ?? null },
 		);
-		if (!allowed) return c.json({ error: "Forbidden: this key is not scoped to this mailbox" }, 403);
+		if (!allowed) {
+			// Distinguish an ownerless (never-claimed) mailbox — recoverable by
+			// claiming it — from one owned by someone else. Collapsing both into a
+			// bare 403 made the raft CLI report "session expired / re-login", which
+			// fixes neither (dogfood: Duoyu).
+			if (!settings.owner) {
+				return c.json({ error: "Mailbox is not linked to any account; claim it first to gain access", code: "MAILBOX_NOT_LINKED" }, 403);
+			}
+			return c.json({ error: "Forbidden: this key is not scoped to this mailbox", code: "FORBIDDEN" }, 403);
+		}
 	}
 
 	// Instantiate DO stub

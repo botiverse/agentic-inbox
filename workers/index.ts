@@ -14,11 +14,14 @@ import {
 	generateMessageId,
 	buildThreadingHeaders,
 	listMailboxes,
+	getFullEmail,
+	unsupportedSendFields,
+	cleanSnippet,
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
-import { canCreateMailbox, planForOwner, claimAllowedForHandle } from "./lib/auth";
-import { mintKey, mintToken, recordOwnedMailbox, countOwnedMailboxes, listOwnedMailboxes } from "./lib/keyRegistry";
+import { maxMailboxesForPlan, planForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart } from "./lib/auth";
+import { mintKey, mintToken, recordOwnedMailbox, removeOwnedMailbox, rotateKey, listOwnerKeys, revokeOwnerKey, keyGuidance } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -29,7 +32,10 @@ type AppContext = Context<MailboxContext>;
 // -- Request body schemas (kept for validation) ---------------------
 
 const CreateMailboxBody = z.object({
-	email: z.string().email(),
+	// Relaxed from .email() so a non-ASCII / malformed address returns an
+	// actionable, namespace-aware 400 (with the caller's derived namespace)
+	// instead of a bare zod error the caller can't act on (AX: 跳虎).
+	email: z.string().min(1),
 	name: z.string().min(1),
 	settings: z.record(z.any()).optional(), // unvalidated — agentSystemPrompt goes straight to AI
 });
@@ -85,6 +91,10 @@ app.use("/api/*", cors({
 	},
 }));
 app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
+// Also guard the bare single-mailbox routes (GET/PUT settings, DELETE) — the
+// `/*` pattern above only matches sub-paths, so without this a scoped-key caller
+// could read/modify/delete a mailbox they don't own.
+app.use("/api/v1/mailboxes/:mailboxId", requireMailbox);
 
 // -- Config ---------------------------------------------------------
 
@@ -98,12 +108,19 @@ app.get("/api/v1/config", (c) => {
 // -- Mailboxes ------------------------------------------------------
 
 app.get("/api/v1/mailboxes", async (c) => {
-	// Scoped-key callers see only their own mailboxes; admin / legacy sees all.
-	const authScope = c.get("authScope");
 	const owner = c.get("authOwner");
-	if (authScope && authScope !== "admin" && owner) {
-		const owned = await listOwnedMailboxes(c.env, owner);
-		return c.json(owned.map((id) => ({ id, email: id, name: id })));
+	const isAdmin = c.get("authIsAdmin") === true;
+	// FAIL CLOSED: only a verified admin sees every mailbox. Anyone else sees ONLY
+	// their own (empty if none). Previously the fallback returned ALL mailboxes for
+	// any request without a clean owner — a fail-open leak that would expose the
+	// whole directory if the identity ever failed to attach.
+	if (!isAdmin) {
+		if (!owner) return c.json([]);
+		// Strongly-consistent list from the per-owner DO (no kv.list lag, so a
+		// just-claimed mailbox shows immediately — dogfood: Box).
+		const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
+		const owned = await ownerStub.list(owner);
+		return c.json(owned.map(({ email, name }) => ({ id: email, email, name })));
 	}
 	const allMailboxes = await listMailboxes(c.env.BUCKET);
 	return c.json(allMailboxes.map((m) => ({ ...m, name: m.id })));
@@ -117,14 +134,38 @@ app.post("/api/v1/mailboxes", async (c) => {
 		// Invalid JSON or schema violation (e.g. non-email `email`, missing `name`).
 		// Return a clean 400 instead of letting the error surface as a 500.
 		const detail = e instanceof z.ZodError ? e.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") : "malformed request body";
-		return c.json({ error: `Invalid request body: ${detail}` }, 400);
+		return c.json({ error: `Invalid request body: ${detail}`, code: "BAD_REQUEST" }, 400);
 	}
 	const { name, settings, email: rawEmail } = parsed;
 	const email = rawEmail.toLowerCase();
 
+	// Address shape + local-part must be ASCII (mail.build only issues ASCII
+	// addresses). Validated BEFORE auth so malformed input returns a clean 400
+	// (not a 500 or an auth 401 that hides the real problem). The caller's
+	// namespace is derived here so every rejection can name the exact address
+	// they CAN claim — crucial for non-ASCII-handle agents, who otherwise hit a
+	// dead-end 400/403 with no path (AX: 跳虎). `handle` is present only when
+	// authenticated, so an unauthenticated caller just gets the bare shape error.
+	const handle = c.get("authHandle");
+	const namespace = handle ? asciiNamespaceForHandle(handle) : "";
+	const derivedNs = !!handle && namespace !== handle.toLowerCase();
+	const nsHint = namespace
+		? (derivedNs
+			? ` Your handle "${handle}" has no ASCII email form, so your claimable namespace is derived: ${namespace}@mail.build (or ${namespace}-<suffix>@mail.build).`
+			: ` Your claimable namespace is ${namespace}@mail.build (or ${namespace}-<suffix>@mail.build).`)
+		: "";
+	const atIdx = email.indexOf("@");
+	const localPart = atIdx > 0 ? email.slice(0, atIdx) : "";
+	if (atIdx < 1 || email.indexOf("@") !== email.lastIndexOf("@") || !email.slice(atIdx + 1)) {
+		return c.json({ error: `email must be a single address of the form <local-part>@<domain>.${nsHint}`, code: "BAD_REQUEST", namespace: namespace || undefined }, 400);
+	}
+	if (!isValidAsciiLocalPart(localPart)) {
+		return c.json({ error: `Mailbox local-part must be ASCII (letters, digits, . _ -).${nsHint}`, code: "INVALID_LOCALPART", namespace: namespace || undefined }, 400);
+	}
+
 	// Claim requires an authenticated owner (agent scoped key or human session).
 	const owner = c.get("authOwner");
-	if (!owner) return c.json({ error: "Authentication required" }, 401);
+	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
 	const isAdmin = c.get("authIsAdmin") === true;
 
 	const allowedAddresses = (c.env.EMAIL_ADDRESSES ?? []) as string[];
@@ -136,53 +177,96 @@ app.post("/api/v1/mailboxes", async (c) => {
 		(allowedAddresses.length > 0 || allowedDomains.length > 0) &&
 		!isAddressAllowed(email, allowedAddresses, allowedDomains)
 	) {
-		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES or DOMAINS" }, 403);
+		return c.json({ error: "Mailbox creation is restricted to configured EMAIL_ADDRESSES or DOMAINS", code: "ADDRESS_NOT_ALLOWED" }, 403);
 	}
 
 	// Anti-squat: non-admin callers may only claim within their own handle
-	// namespace (`<handle>@` / `<handle>-*`), never a reserved system name.
+	// namespace (`<namespace>@` / `<namespace>-*`), never a reserved system name.
 	// Prevents agent A from claiming B's identity address.
 	if (!isAdmin) {
-		const handle = c.get("authHandle");
-		const localPart = email.split("@")[0] ?? "";
-		if (!handle || !claimAllowedForHandle(localPart, handle)) {
+		if (!handle || !claimAllowedForHandle(localPart, namespace)) {
 			return c.json({
-				error: "You can only claim mailboxes under your own handle (<handle>@ or <handle>-*); reserved system names are not allowed",
+				error: `You can only claim mailboxes under your own namespace, and reserved system names are not allowed.${nsHint}`,
+				code: "NAMESPACE_FORBIDDEN",
+				namespace: namespace || undefined,
 			}, 403);
 		}
 	}
 
-	// Tier quota: free = 1 mailbox, pro = 10 (pro = raft-server tier). Admin exempt.
-	if (!isAdmin) {
-		const plan = planForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS));
-		const owned = await countOwnedMailboxes(c.env, owner);
-		if (!canCreateMailbox(plan, owned)) {
-			return c.json({ error: `Mailbox quota reached for plan '${plan}'`, plan, owned }, 403);
+	// Existence check runs BEFORE the quota gate: re-claiming a mailbox you
+	// already own is idempotent (never blocked by quota), a taken address is
+	// rejected cleanly, and an ownerless mailbox is adopted rather than 409'd.
+	const key = `mailboxes/${email}.json`;
+	const existingObj = await c.env.BUCKET.get(key);
+	let existingSettings: (Record<string, unknown> & { owner?: string; fromName?: string }) | null = null;
+	if (existingObj) {
+		existingSettings = (await existingObj.json()) as Record<string, unknown> & { owner?: string; fromName?: string };
+		// Ownership disposition. Anti-squat namespace already enforced above, so an
+		// "adopt" here only ever covers the caller's own ownerless address (e.g. an
+		// admin-provisioned canonical <handle>@). (dogfood: Gogo/Box — 7/13 orphans.)
+		const action = classifyClaim(true, existingSettings.owner, owner);
+		if (action === "idempotent") {
+			// Already yours — no new key minted.
+			return c.json({ id: email, email, name: existingSettings.fromName || name, owner, settings: existingSettings }, 200);
 		}
+		if (action === "taken") {
+			return c.json({ error: "Mailbox already exists and is owned by another account", code: "MAILBOX_TAKEN" }, 409);
+		}
+		// action === "adopt": fall through.
 	}
 
-	const key = `mailboxes/${email}.json`;
-	if (await c.env.BUCKET.head(key)) return c.json({ error: "Mailbox already exists" }, 409);
+	const adopting = existingSettings !== null;
 	const defaultSettings = { fromName: name, forwarding: { enabled: false, email: "" }, signature: { enabled: false, text: "" }, autoReply: { enabled: false, subject: "", message: "" } };
-	// `owner` is the source of truth for mailbox ownership (API access is scoped to it).
-	const finalSettings = { ...defaultSettings, ...settings, owner };
-	await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
-	await recordOwnedMailbox(c.env, owner, email);
-	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
-	await stub.getFolders();
+	// Adoption preserves the existing mailbox settings (and its stored mail);
+	// a fresh claim starts from defaults. Either way `owner` is stamped as the
+	// source of truth for API access scoping.
+	const finalSettings = adopting
+		? { ...(existingSettings as Record<string, unknown>), owner }
+		: { ...defaultSettings, ...settings, owner };
+	const displayName = (finalSettings as { fromName?: string }).fromName || name;
+
+	// Tier quota (a fresh claim OR an orphan adoption both consume a slot). This
+	// is an ATOMIC check-and-reserve in the per-owner DO — strongly consistent, so
+	// two rapid claims can't both slip past the limit (dogfood: Cardy — the old
+	// kv.list count lagged ~60s and let a 3rd mailbox through on free=1). Admin
+	// gets an effectively unlimited allowance but is still recorded.
+	const plan = planForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS));
+	const limit = isAdmin ? Number.MAX_SAFE_INTEGER : maxMailboxesForPlan(plan);
+	const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
+	const reservation = await ownerStub.reserve(owner, email, displayName, limit);
+	if (!reservation.ok) {
+		return c.json({ error: `Mailbox quota reached for plan '${plan}'`, code: "QUOTA_EXCEEDED", plan, owned: reservation.owned }, 403);
+	}
+
+	try {
+		await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
+		const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
+		await stub.getFolders();
+	} catch (e) {
+		// Don't leak a reserved slot if provisioning fails after reserving.
+		await ownerStub.release(owner, email).catch(() => {});
+		throw e;
+	}
+	// Keep the legacy KV index in sync (seed source / backfill safety net; the DO
+	// is the count+list authority).
+	await recordOwnedMailbox(c.env, owner, email, displayName);
 
 	// Mint a mailbox-scoped access key — returned ONCE (finest isolation: this
 	// key can only touch this one mailbox).
 	const token = mintToken();
-	await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
+	const { hash: keyId } = await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
 
-	return c.json({ id: email, email, name, owner, settings: finalSettings, key: token }, 201);
+	// Never hand out a bare credential — ship onboarding guidance with the key.
+	// `keyId` is the handle for revoke (DELETE .../keys/{id}) so the caller can
+	// revoke the key it just got in one step, without a list-keys round-trip
+	// (AX: HuangSong — claim/rotate returned the raw key but not its id).
+	return c.json({ id: email, email, name: displayName, owner, settings: finalSettings, key: token, keyId, key_guidance: keyGuidance(email), adopted: adopting || undefined }, adopting ? 200 : 201);
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const obj = await c.env.BUCKET.get(`mailboxes/${mailboxId}.json`);
-	if (!obj) return c.json({ error: "Not found" }, 404);
+	if (!obj) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings: await obj.json() });
 });
 
@@ -190,20 +274,77 @@ app.put("/api/v1/mailboxes/:mailboxId", async (c) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const { settings } = (await c.req.json()) as { settings: Record<string, unknown> };
 	const key = `mailboxes/${mailboxId}.json`;
-	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
+	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	await c.env.BUCKET.put(key, JSON.stringify(settings));
 	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings });
 });
 
-app.delete("/api/v1/mailboxes/:mailboxId", async (c) => {
+app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
+	// Ownership is enforced by requireMailbox; release the quota slot so the owner
+	// can reclaim it (dogfood: Duoyu — testers had no way to free a slot / clean up
+	// residue, so each trial permanently burned a mailbox against the quota).
 	const mailboxId = c.req.param("mailboxId")!;
 	const key = `mailboxes/${mailboxId}.json`;
-	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found" }, 404);
+	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	await c.env.BUCKET.delete(key); // TODO: also delete DO data and R2 attachment blobs
+	const owner = c.get("authOwner");
+	if (owner) {
+		const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
+		await ownerStub.release(owner, mailboxId);
+		await removeOwnedMailbox(c.env, owner, mailboxId);
+	}
+	return c.body(null, 204);
+});
+
+// -- Mailbox access keys (rotate / list / revoke) -------------------
+// All under requireMailbox, so the caller must own :mailboxId. Keys are scoped to
+// the mailbox; the raw token is only ever returned once (mint/rotate).
+
+// Rotate the mailbox key: mint a fresh one (returned once) + revoke the old.
+app.post("/api/v1/mailboxes/:mailboxId/keys/rotate", async (c: AppContext) => {
+	const mailboxId = c.req.param("mailboxId")!;
+	const owner = c.get("authOwner");
+	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
+	const token = mintToken();
+	const { hash: keyId, revoked } = await rotateKey(c.env, { owner, scope: mailboxId, token, label: `mailbox ${mailboxId}`, now: new Date().toISOString() });
+	// Return `keyId` so the new key can be revoked in one step (no list-keys hop).
+	return c.json({ id: mailboxId, email: mailboxId, key: token, keyId, key_guidance: keyGuidance(mailboxId), revoked }, 201);
+});
+
+// List this mailbox's key metadata — NEVER the raw token.
+app.get("/api/v1/mailboxes/:mailboxId/keys", async (c: AppContext) => {
+	const mailboxId = c.req.param("mailboxId")!;
+	const owner = c.get("authOwner");
+	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
+	const keys = await listOwnerKeys(c.env, owner, mailboxId);
+	return c.json({ keys });
+});
+
+// Revoke a specific key of this mailbox (owner-scoped by keyId).
+app.delete("/api/v1/mailboxes/:mailboxId/keys/:keyId", async (c: AppContext) => {
+	const owner = c.get("authOwner");
+	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
+	// Pass the path mailbox as the expected scope so this route only revokes THIS
+	// mailbox's key (path-scope consistency), not another mailbox's key.
+	const ok = await revokeOwnerKey(c.env, owner, c.req.param("keyId")!, c.req.param("mailboxId")!);
+	if (!ok) return c.json({ error: "Key not found", code: "NOT_FOUND" }, 404);
 	return c.body(null, 204);
 });
 
 // -- Emails ---------------------------------------------------------
+
+// Canonicalize list/search rows for the API: (1) clean the snippet preview — the
+// DO computes it as SUBSTR(body,1,300) = raw HTML, which can cut mid-tag and
+// leave a dangling `…<img class="s` fragment the complete-tag stripper can't
+// remove (AX: Yingjun; interim ahead of Gogo's ingest snippet column); (2) alias
+// the DO storage columns sender/recipient → canonical from/to (the API exposes
+// from/to; storage keeps sender/recipient — first-principles, tygg pre-launch
+// break-freely). Gogo's PR then drops sender/recipient + moves snippet to a column.
+function canonicalRows<T extends { snippet?: string | null; sender?: string | null; recipient?: string | null }>(rows: T[]): T[] {
+	return rows.map((e) =>
+		e ? ({ ...e, ...(e.snippet ? { snippet: cleanSnippet(e.snippet) } : {}), from: e.sender, to: e.recipient }) : e,
+	);
+}
 
 app.get("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const folder = c.req.query("folder");
@@ -218,14 +359,14 @@ app.get("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	if (threaded && folder) {
 		const emails = await (stub as any).getThreadedEmails({ folder, page, limit });
 		const totalCount = await (stub as any).countThreadedEmails(folder);
-		return c.json({ emails, totalCount });
+		return c.json({ emails: canonicalRows(emails), totalCount });
 	}
 	const emails = await stub.getEmails({ folder, thread_id, page, limit, sortColumn, sortDirection });
 	if (folder) {
 		const totalCount = await stub.countEmails({ folder, thread_id });
-		return c.json({ emails, totalCount });
+		return c.json({ emails: canonicalRows(emails), totalCount });
 	}
-	return c.json(emails);
+	return c.json(canonicalRows(emails));
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
@@ -237,14 +378,14 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	try {
 		({ toStr, fromEmail, fromDomain } = validateSender(to, from, mailboxId));
 	} catch (e) {
-		if (e instanceof SenderValidationError) return c.json({ error: e.message }, 400);
+		if (e instanceof SenderValidationError) return c.json({ error: e.message, code: "BAD_REQUEST" }, 400);
 		throw e;
 	}
 
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 	const stub = c.var.mailboxStub;
 	const rateLimitError = await (stub as any).checkSendRateLimit();
-	if (rateLimitError) return c.json({ error: rateLimitError }, 429);
+	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
 	await stub.createEmail(Folders.SENT, {
@@ -274,6 +415,72 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	return c.json({ id: messageId, status: "sent" }, 202);
 });
 
+// Internal-only send (v0): deliver from an owned mailbox to another mailbox on a
+// configured domain by writing straight into the recipient's inbox — NO external
+// SMTP egress, so no SPF/DKIM/DMARC/open-relay/spoofing surface. Owner-scoped
+// (requireMailbox gates the FROM mailbox); the recipient mailbox must already
+// exist. External outbound is a separate v0.1 with domain-auth + abuse controls.
+app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
+	const from = c.req.param("mailboxId")!.toLowerCase();
+	let reqBody: { to?: string; subject?: string; text?: string; html?: string };
+	try {
+		reqBody = (await c.req.json()) as typeof reqBody;
+	} catch {
+		return c.json({ error: "Invalid JSON body", code: "BAD_REQUEST" }, 400);
+	}
+	// v0 send honors ONLY to/subject/text/html. Reject anything else LOUDLY
+	// instead of silently dropping it (dogfood: HuangSong — in_reply_to/attachments
+	// were silently ignored while the call still returned 202 "sent" = false
+	// confidence). A redundant `mailboxId` echo that equals the path param is
+	// tolerated (the `raft integration invoke` CLI merges a POST action's path
+	// param into the body — dogfood: 跳虎; CLI root cause routed to Ray). See
+	// unsupportedSendFields for the exact boundary (== path drop / ≠ path reject).
+	if (typeof reqBody !== "object" || reqBody === null || Array.isArray(reqBody)) {
+		return c.json({ error: "Request body must be a JSON object", code: "BAD_REQUEST" }, 400);
+	}
+	const unsupported = unsupportedSendFields(reqBody as Record<string, unknown>, from);
+	if (unsupported.length > 0) {
+		return c.json({ error: `Unsupported field(s): ${unsupported.join(", ")}. v0 send supports only to/subject/text/html — no threading (in_reply_to) or attachments yet.`, code: "UNSUPPORTED_FIELD", unsupported }, 400);
+	}
+	const to = (reqBody.to || "").trim().toLowerCase();
+	if (!to || !/^[^@\s]+@[^@\s]+$/.test(to)) {
+		return c.json({ error: "A valid `to` address is required", code: "BAD_REQUEST" }, 400);
+	}
+	// Internal-only: the recipient must be on a configured domain / allowlist.
+	if (!isAddressAllowed(to, (c.env.EMAIL_ADDRESSES ?? []) as string[], parseDomains(c.env.DOMAINS))) {
+		return c.json({ error: "v0 send is internal-only: the recipient must be a mailbox on a configured domain (e.g. @mail.build)", code: "SEND_EXTERNAL_UNSUPPORTED" }, 400);
+	}
+	// Recipient mailbox must already exist (internal delivery has no MX fallback).
+	if (!(await c.env.BUCKET.head(`mailboxes/${to}.json`))) {
+		return c.json({ error: "Recipient mailbox does not exist", code: "NOT_FOUND" }, 404);
+	}
+	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit();
+	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
+
+	const subject = (reqBody.subject || "").toString();
+	const content = (reqBody.html || reqBody.text || "").toString();
+	const fromDomain = from.split("@")[1] || "mail.build";
+	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
+	const now = new Date().toISOString();
+	const common = {
+		subject, sender: from, recipient: to, cc: null, bcc: null, date: now,
+		body: content, in_reply_to: null, email_references: null,
+		thread_id: messageId, message_id: outgoingMessageId,
+		raw_headers: JSON.stringify([
+			{ key: "from", value: from }, { key: "to", value: to },
+			{ key: "subject", value: subject }, { key: "date", value: now },
+			{ key: "message-id", value: `<${outgoingMessageId}>` },
+			{ key: "x-agentic-inbox-delivery", value: "internal" },
+		]),
+	};
+	// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
+	const toStub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(to));
+	await toStub.createEmail(Folders.INBOX, { id: messageId, ...common }, []);
+	await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
+
+	return c.json({ id: messageId, status: "sent", delivery: "internal" }, 202);
+});
+
 app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const { to, cc, bcc, subject, body, in_reply_to, thread_id, draft_id } = DraftBody.parse(await c.req.json());
@@ -290,12 +497,29 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	return c.json({ id: messageId, status: "draft", subject: subject || "", recipient: to || "", date: now }, 201);
 });
 
-app.get("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
-	const email = await c.var.mailboxStub.getEmail(c.req.param("id")!);
-	if (!email) return c.json({ error: "Email not found" }, 404);
-	return new Response(JSON.stringify(email), {
-		headers: { "Content-Type": "application/json" },
-	});
+app.get("/api/v1/mailboxes/:mailboxId/emails/:emailId", async (c: AppContext) => {
+	// Path param is `emailId` (was `id`) to match `mailboxId` — agents intuitively
+	// tried `emailId` and hit an unhelpful "missing path parameter" (AX: Yingjun,
+	// first production use). The manifest declares `{emailId}` in lockstep.
+	const email = await getFullEmail(c.var.mailboxStub, c.req.param("emailId")!);
+	if (!email) return c.json({ error: "Email not found", code: "NOT_FOUND" }, 404);
+	// Stable agent-facing contract: `body_text` (HTML stripped to plain) and
+	// `body_html` (null when the message has no HTML part) come from getFullEmail;
+	// add `from`/`to` aliases over the stored `sender`/`recipient`.
+	//
+	// LEAN by default (AX: Yingjun — a verification email is ~8KB of HTML+headers
+	// for ~60 bytes of signal, and agents pay tokens for every byte). The raw
+	// `body` is redundant with body_html/body_text, and raw_headers is large and
+	// rarely needed — both are DROPPED unless explicitly requested via
+	// `?include=raw_body` / `?include=raw_headers` (comma-separated). The human UI
+	// opts into both (it renders the raw body + a raw-headers dialog).
+	const includes = new Set((c.req.query("include") || "").split(",").map((s) => s.trim()).filter(Boolean));
+	const e = email as typeof email & { sender?: string; recipient?: string; body?: string | null; raw_headers?: string | null };
+	const { body: rawBody, raw_headers: rawHeaders, ...lean } = e;
+	const withContract: Record<string, unknown> = { ...lean, from: e.sender, to: e.recipient };
+	if (includes.has("raw_body")) withContract.body = rawBody;
+	if (includes.has("raw_headers")) withContract.raw_headers = rawHeaders;
+	return c.json(withContract);
 });
 
 app.put("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
@@ -369,7 +593,7 @@ app.get("/api/v1/mailboxes/:mailboxId/search", async (c: AppContext) => {
 	const stub = c.var.mailboxStub as any;
 	const emails = await stub.searchEmails({ ...searchOpts, page: intQuery(c, "page"), limit: intQuery(c, "limit") });
 	const totalCount = await stub.countSearchResults(searchOpts);
-	return c.json({ emails, totalCount });
+	return c.json({ emails: canonicalRows(emails), totalCount });
 });
 
 // -- Attachments ----------------------------------------------------
@@ -468,11 +692,21 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
 	}, attachmentData);
 
-	const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
-	ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
-		method: "POST", headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
-	})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
+	// Built-in AI auto-draft is OPT-IN and OFF by default. Firing it on every
+	// inbound email would (a) run Workers AI ~3-4× per message = a real cost driver,
+	// and (b) conflict with the "no autonomous draft/write without explicit human
+	// instruction" discipline (stdrc). Only fire when the mailbox explicitly enables
+	// `autoDraft`. Direction is MCP-forward — a user's own agent manages the mail —
+	// over a built-in model.
+	const mboxObj = await env.BUCKET.get(`mailboxes/${mailboxId}.json`);
+	const mboxSettings = mboxObj ? ((await mboxObj.json().catch(() => null)) as { autoDraft?: { enabled?: boolean } } | null) : null;
+	if (mboxSettings?.autoDraft?.enabled === true) {
+		const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
+		ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
+			method: "POST", headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
+		})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
+	}
 }
 
 export { app, receiveEmail };

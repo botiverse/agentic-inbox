@@ -130,6 +130,19 @@ export function escapeHtml(text: string): string {
 }
 
 /**
+ * Render-ready HTML for an email body. Uses `body_html` (the HTML part) when
+ * present; for plain-text mail (`body_html === null`) it falls back to the
+ * escaped `body_text` so the message never renders blank — the raw `body` field
+ * that the UI used to render was dropped as redundant (first-principles canonical
+ * shape; tygg pre-launch break-freely). (AX: Yingjun.)
+ */
+export function emailBodyHtml(email: { body_html?: string | null; body_text?: string | null }): string {
+	if (email.body_html) return email.body_html;
+	const text = email.body_text || "";
+	return text ? escapeHtml(text).replace(/\n/g, "<br>") : "";
+}
+
+/**
  * Generate the HTML signature block for compose forms.
  */
 export function getSignatureBlock(settings?: {

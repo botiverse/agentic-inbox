@@ -265,7 +265,7 @@ export default function EmailListRoute() {
 			if (names.length <= 3) return names.join(", ");
 			return `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
 		}
-		return email.sender.split("@")[0];
+		return email.from.split("@")[0];
 	};
 
 	return (

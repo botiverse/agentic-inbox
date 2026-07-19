@@ -6,6 +6,18 @@ import type { Email, Folder, Mailbox } from "~/types";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
+// Onboarding guidance shipped alongside a freshly-issued mailbox key.
+export interface KeyGuidance {
+	what: string;
+	scope: string;
+	how_to_use: string;
+	save: string;
+	rotate: string;
+	revoke: string;
+	not_needed_for: string;
+}
+export type KeyResponse = { key?: string; key_guidance?: KeyGuidance };
+
 export class ApiError extends Error {
 	status: number;
 	body: Record<string, unknown>;
@@ -101,9 +113,13 @@ const api = {
 
 	// Mailboxes
 	listMailboxes: () => get<Mailbox[]>("/api/v1/mailboxes"),
-	// Claim returns the mailbox plus a mailbox-scoped access key (shown ONCE).
+	// Claim returns the mailbox plus a mailbox-scoped access key (shown ONCE) and
+	// onboarding guidance for that key.
 	createMailbox: (email: string, name: string, settings?: unknown) =>
-		post<Mailbox & { key?: string }>("/api/v1/mailboxes", { email, name, settings }),
+		post<Mailbox & KeyResponse>("/api/v1/mailboxes", { email, name, settings }),
+	// Rotate a mailbox key: mints a new one (shown ONCE) + invalidates the old.
+	rotateMailboxKey: (mailboxId: string) =>
+		post<{ id: string; email: string } & KeyResponse>(`/api/v1/mailboxes/${mailboxId}/keys/rotate`, {}),
 	getMailbox: (mailboxId: string) =>
 		get<Mailbox>(`/api/v1/mailboxes/${mailboxId}`),
 	updateMailbox: (mailboxId: string, settings: unknown) =>
@@ -117,7 +133,10 @@ const api = {
 	sendEmail: (mailboxId: string, email: unknown) =>
 		post<void>(`/api/v1/mailboxes/${mailboxId}/emails`, email),
 	getEmail: (mailboxId: string, id: string, opts?: { signal?: AbortSignal }) =>
-		get<Email>(`/api/v1/mailboxes/${mailboxId}/emails/${id}`, { signal: opts?.signal }),
+		// get-email is LEAN by default (agents pay tokens for it). The UI renders
+		// from body_html/body_text (canonical) and only needs raw_headers for its
+		// "view source" dialog, so it opts into just that (AX: Yingjun).
+		get<Email>(`/api/v1/mailboxes/${mailboxId}/emails/${id}?include=raw_headers`, { signal: opts?.signal }),
 	updateEmail: (mailboxId: string, id: string, data: unknown) =>
 		put<Email>(`/api/v1/mailboxes/${mailboxId}/emails/${id}`, data),
 	deleteEmail: (mailboxId: string, id: string) =>
