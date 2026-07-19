@@ -15,8 +15,8 @@ import {
 	buildThreadingHeaders,
 	listMailboxes,
 	getFullEmail,
-	stripHtmlToText,
 	unsupportedSendFields,
+	cleanSnippet,
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
@@ -346,8 +346,16 @@ app.get("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	// The DO computes snippet as SUBSTR(body,1,300) = raw HTML for HTML mail, so
 	// a UI/agent using it as a preview sees literal tags. Strip to plain text
 	// (dogfood: Duoyu). body_text elsewhere is already stripped.
+	//
+	// SUBSTR can also cut mid-tag, leaving a DANGLING open tag at the end
+	// (`…<img class="s`) that the complete-tag stripper (`<[^>]+>`) can't match, so
+	// the fragment survives (AX: Yingjun). Drop a trailing incomplete `<…` (no
+	// closing `>` before end) BEFORE stripping. Scoped to the snippet preview — we
+	// deliberately do NOT do this in stripHtmlToText, which must not clip a
+	// legitimate trailing `<` in full body_text. Interim: the durable fix persists
+	// a stripped snippet column at ingest (Gogo, DO — schema thread pending).
 	const stripSnippets = <T extends { snippet?: string | null }>(rows: T[]): T[] =>
-		rows.map((e) => (e && e.snippet ? { ...e, snippet: stripHtmlToText(e.snippet).slice(0, 300) } : e));
+		rows.map((e) => (e && e.snippet ? { ...e, snippet: cleanSnippet(e.snippet) } : e));
 
 	if (threaded && folder) {
 		const emails = await (stub as any).getThreadedEmails({ folder, page, limit });
@@ -490,15 +498,28 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	return c.json({ id: messageId, status: "draft", subject: subject || "", recipient: to || "", date: now }, 201);
 });
 
-app.get("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
-	const email = await getFullEmail(c.var.mailboxStub, c.req.param("id")!);
+app.get("/api/v1/mailboxes/:mailboxId/emails/:emailId", async (c: AppContext) => {
+	// Path param is `emailId` (was `id`) to match `mailboxId` — agents intuitively
+	// tried `emailId` and hit an unhelpful "missing path parameter" (AX: Yingjun,
+	// first production use). The manifest declares `{emailId}` in lockstep.
+	const email = await getFullEmail(c.var.mailboxStub, c.req.param("emailId")!);
 	if (!email) return c.json({ error: "Email not found", code: "NOT_FOUND" }, 404);
 	// Stable agent-facing contract: `body_text` (HTML stripped to plain) and
 	// `body_html` (null when the message has no HTML part) come from getFullEmail;
-	// add `from`/`to` aliases over the stored `sender`/`recipient`. Original fields
-	// (sender/recipient/body) are kept for the human UI.
-	const e = email as typeof email & { sender?: string; recipient?: string };
-	const withContract = { ...e, from: e.sender, to: e.recipient };
+	// add `from`/`to` aliases over the stored `sender`/`recipient`.
+	//
+	// LEAN by default (AX: Yingjun — a verification email is ~8KB of HTML+headers
+	// for ~60 bytes of signal, and agents pay tokens for every byte). The raw
+	// `body` is redundant with body_html/body_text, and raw_headers is large and
+	// rarely needed — both are DROPPED unless explicitly requested via
+	// `?include=raw_body` / `?include=raw_headers` (comma-separated). The human UI
+	// opts into both (it renders the raw body + a raw-headers dialog).
+	const includes = new Set((c.req.query("include") || "").split(",").map((s) => s.trim()).filter(Boolean));
+	const e = email as typeof email & { sender?: string; recipient?: string; body?: string | null; raw_headers?: string | null };
+	const { body: rawBody, raw_headers: rawHeaders, ...lean } = e;
+	const withContract: Record<string, unknown> = { ...lean, from: e.sender, to: e.recipient };
+	if (includes.has("raw_body")) withContract.body = rawBody;
+	if (includes.has("raw_headers")) withContract.raw_headers = rawHeaders;
 	return c.json(withContract);
 });
 

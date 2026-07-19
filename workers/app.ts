@@ -251,8 +251,8 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "get-email",
-					description: "Read a single email in one of your mailboxes. Returns a structured (not raw MIME) object: from/to (aliases of sender/recipient), subject, date, body_text (HTML stripped to plain — safe to grep for codes/links), body_html (null when there was no HTML part), snippet, read, and raw_headers.",
-					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails/{id}" },
+					description: "Read a single email in one of your mailboxes. Path params: {mailboxId} + {emailId} (the email id from list-emails). Returns a LEAN structured (not raw MIME) object by default: from/to (aliases of sender/recipient), subject, date, body_text (HTML stripped to plain — safe to grep for codes/links), body_html (null when there was no HTML part), snippet, read. Large/raw fields are opt-in to save tokens: add query `?include=raw_headers` for raw_headers, `?include=raw_body` for the raw stored body, or `?include=raw_headers,raw_body` for both.",
+					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/emails/{emailId}" },
 				},
 				{
 					name: "release-mailbox",

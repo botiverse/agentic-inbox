@@ -341,3 +341,17 @@ export function unsupportedSendFields(
 		return true;
 	});
 }
+
+/**
+ * Build a clean plain-text snippet preview from a raw (possibly HTML) body prefix.
+ * The list query passes `SUBSTR(body,1,N)`, which can cut mid-tag and leave a
+ * dangling open tag (`…<img class="s`) that the complete-tag stripper can't
+ * remove — so drop a trailing incomplete `<…` (no closing `>` before end) first,
+ * THEN strip tags/entities, THEN truncate. Scoped to snippets on purpose: we do
+ * NOT clip trailing `<` in full body_text. (AX: Yingjun — snippet fragments.)
+ * Gogo's durable fix persists this at ingest; this is the shared strip semantic.
+ */
+export function cleanSnippet(raw: string | null | undefined, maxLen = 300): string {
+	if (!raw) return "";
+	return stripHtmlToText(raw.replace(/<[^>]*$/, "")).slice(0, maxLen);
+}

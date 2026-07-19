@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields } from "./email-helpers";
+import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet } from "./email-helpers";
 
 describe("getFullEmail body_html is raw (XSS guard — dogfood: Duoyu)", () => {
 	// A sender safely-escaped `<script>` as display text. body_html is rendered,
@@ -98,5 +98,37 @@ describe("unsupportedSendFields (strict fields + tolerant path-echo — dogfood:
 		const out = unsupportedSendFields({ mailboxId: "other@mail.build", to: "a@mail.build", in_reply_to: "x" }, box);
 		expect(out).toContain("mailboxId");
 		expect(out).toContain("in_reply_to");
+	});
+});
+
+describe("cleanSnippet (list preview — drops mid-tag truncation fragments — AX: Yingjun)", () => {
+	it("drops a dangling incomplete tag left by SUBSTR mid-tag truncation", () => {
+		// SUBSTR(body,1,N) cut inside an <img …> → `<img class="s` survives the
+		// complete-tag stripper. cleanSnippet must not leak the fragment.
+		expect(cleanSnippet('<p>Your code is 123456</p><img class="s')).toBe("Your code is 123456");
+		expect(cleanSnippet('Hello world <div class="foo" styl')).toBe("Hello world");
+	});
+	it("strips complete tags + decodes entities like body_text", () => {
+		expect(cleanSnippet("<p>a&amp;b</p>")).toBe("a&b");
+		expect(cleanSnippet("<a href='https://x'>link</a> text")).toBe("link text");
+	});
+	it("leaves plain text intact; a trailing bare `<` is treated as a dangling tag", () => {
+		expect(cleanSnippet("just plain text")).toBe("just plain text");
+		expect(cleanSnippet("code ABC-123 first")).toBe("code ABC-123 first");
+		// a trailing `<…` at the very end is stripped as a dangling tag — an
+		// acceptable over-strip for a PREVIEW only (full body_text is untouched;
+		// stripHtmlToText deliberately does not do this).
+		expect(cleanSnippet("5 is < ")).toBe("5 is");
+		// real HTML has `>` in complete tags, so only the trailing dangling tag goes:
+		expect(cleanSnippet("<p>done</p><span sty")).toBe("done");
+	});
+	it("truncates to maxLen", () => {
+		expect(cleanSnippet("x".repeat(500)).length).toBe(300);
+		expect(cleanSnippet("abcdef", 3)).toBe("abc");
+	});
+	it("handles null/empty", () => {
+		expect(cleanSnippet(null)).toBe("");
+		expect(cleanSnippet("")).toBe("");
+		expect(cleanSnippet(undefined)).toBe("");
 	});
 });
