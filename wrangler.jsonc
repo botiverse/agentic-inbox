@@ -14,6 +14,11 @@
 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
 		// The worker now fails closed outside local development if Access is not configured.
 		"DOMAINS": "mail.build",
+		// External domains we may send TO. Deliberately narrow for the first
+		// outbound rollout (artin 2026-08-19): we had never sent externally, so
+		// deliverability was unmeasured. Widen once a real Authentication-Results
+		// confirms SPF/DKIM alignment.
+		"EXTERNAL_SEND_DOMAINS": "gmail.com,botiverse.dev,cat.ms,oranix.io",
 		// Per-agent auth (task #1). PRO_SERVER_IDS = comma-separated raft server_ids
 		// on the pro tier (pro=10 mailboxes/agent, free=1). RAFT_OAUTH_* = Login with
 		// Raft Connected App; CLIENT_SECRET is set via `wrangler secret`, not here.

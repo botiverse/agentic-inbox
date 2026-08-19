@@ -251,3 +251,88 @@ describe("internal send resolves a +tag recipient to its base mailbox", () => {
 		expect(body.error).toContain("ghost@mail.build"); // names the base, not the tag
 	});
 });
+
+// --- External sending: allow-listed only, and failures must be loud ------------
+// artin enabled Cloudflare Email Sending on the mail.build apex and chose to start
+// with a domain allow-list, because outbound deliverability had never been
+// measured. These lock the routing decision: internal vs allowed-external vs
+// refused, and that a provider failure is NOT reported as success.
+
+describe("send routing: internal / allow-listed external / refused", () => {
+	function env(sendImpl?: (m: unknown) => Promise<void>) {
+		const sent: unknown[] = [];
+		const stored: Array<{ folder: string; row: Record<string, unknown> }> = [];
+		const e = {
+			DOMAINS: "mail.build",
+			EXTERNAL_SEND_DOMAINS: "gmail.com,cat.ms",
+			EMAIL_ADDRESSES: [],
+			// the real helper reads `result.messageId`, so the fake must return it
+			EMAIL: { send: sendImpl ?? (async (m: unknown) => { sent.push(m); return { messageId: "test-msg-id" }; }) },
+			BUCKET: {
+				head: async (k: string) => (k === "mailboxes/postel@mail.build.json" ? {} : null),
+				get: async (k: string) =>
+					k === "mailboxes/postel@mail.build.json" ? { json: async () => ({ owner: "t" }) } : null,
+			},
+			MAILBOX: {
+				idFromName: (n: string) => n,
+				get: () => ({
+					createEmail: async (folder: string, row: Record<string, unknown>) => { stored.push({ folder, row }); },
+					checkSendRateLimit: async () => null,
+				}),
+			},
+		} as never;
+		return { e, sent, stored };
+	}
+	async function send(to: string, envObj: never) {
+		return app.request("/api/v1/mailboxes/postel@mail.build/send", {
+			method: "POST", headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ to, subject: "s", text: "t" }),
+		}, envObj);
+	}
+
+	it("refuses a domain that is NOT on the allow-list, and names what IS allowed", async () => {
+		const { e, sent } = env();
+		const res = await send("someone@not-allowed.example", e);
+		expect(res.status).toBe(400);
+		const b = await res.json() as { code: string; allowedExternalDomains: string[] };
+		expect(b.code).toBe("SEND_EXTERNAL_UNSUPPORTED");
+		expect(b.allowedExternalDomains).toEqual(["gmail.com", "cat.ms"]);
+		expect(sent).toHaveLength(0); // nothing was handed to the provider
+	});
+
+	it("sends to an allow-listed external domain via the provider", async () => {
+		const { e, sent, stored } = env();
+		const res = await send("artin@cat.ms", e);
+		expect(res.status).toBe(202);
+		expect((await res.json() as { delivery: string }).delivery).toBe("external");
+		expect(sent).toHaveLength(1);
+		// a copy is filed in Sent, marked external
+		expect(stored.some((x) => x.folder === "sent")).toBe(true);
+	});
+
+	it("does NOT require an external recipient to exist as a local mailbox", async () => {
+		// the receiving server answers that, with a bounce — the behaviour we just
+		// gave our own inbound path. A 404 here would be us guessing.
+		const { e } = env();
+		expect((await send("nobody@gmail.com", e)).status).toBe(202);
+	});
+
+	it("still delivers internally without touching the provider", async () => {
+		const { e, sent, stored } = env();
+		const res = await send("postel+tag@mail.build", e);
+		expect(res.status).toBe(202);
+		expect((await res.json() as { delivery: string }).delivery).toBe("internal");
+		expect(sent).toHaveLength(0);
+		expect(stored.some((x) => x.folder === "inbox")).toBe(true);
+	});
+
+	it("reports a provider failure as 502, NOT as a successful send", async () => {
+		// The whole point of tonight's inbound work: never return success for
+		// something that did not happen.
+		const { e, stored } = env(async () => { throw new Error("provider refused"); });
+		const res = await send("artin@cat.ms", e);
+		expect(res.status).toBe(502);
+		expect((await res.json() as { code: string }).code).toBe("SEND_FAILED");
+		expect(stored).toHaveLength(0); // and it is NOT filed as Sent
+	});
+});

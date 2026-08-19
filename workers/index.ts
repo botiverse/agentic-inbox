@@ -459,9 +459,25 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	if (!to || !/^[^@\s]+@[^@\s]+$/.test(to)) {
 		return c.json({ error: "A valid `to` address is required", code: "BAD_REQUEST" }, 400);
 	}
-	// Internal-only: the recipient must be on a configured domain / allowlist.
-	if (!isAddressAllowed(to, (c.env.EMAIL_ADDRESSES ?? []) as string[], parseDomains(c.env.DOMAINS))) {
-		return c.json({ error: "v0 send is internal-only: the recipient must be a mailbox on a configured domain (e.g. @mail.build)", code: "SEND_EXTERNAL_UNSUPPORTED" }, 400);
+	// Recipients split into two paths:
+	//   - on one of OUR domains  -> internal delivery (worker -> DO, no SMTP)
+	//   - on an allow-listed EXTERNAL domain -> real outbound via Cloudflare Email
+	//     Sending (onboarded for mail.build 2026-08-19)
+	// External sending starts allow-listed rather than open (artin's call): we have
+	// never sent outbound before, so deliverability is unmeasured. A narrow list
+	// lets us prove alignment on a controlled recipient before every agent can mail
+	// anyone. Widen it once the first real Authentication-Results comes back clean.
+	const isInternal = isAddressAllowed(to, (c.env.EMAIL_ADDRESSES ?? []) as string[], parseDomains(c.env.DOMAINS));
+	const externalDomains = parseDomains(c.env.EXTERNAL_SEND_DOMAINS);
+	const toDomain = to.split("@")[1] ?? "";
+	if (!isInternal && !externalDomains.includes(toDomain)) {
+		return c.json({
+			error: externalDomains.length > 0
+				? `Cannot send to ${toDomain}: external sending is limited to an allow-list while outbound deliverability is being verified. Allowed: ${externalDomains.join(", ")} (plus any mailbox on this service).`
+				: "Sending is internal-only: the recipient must be a mailbox on a configured domain (e.g. @mail.build)",
+			code: "SEND_EXTERNAL_UNSUPPORTED",
+			allowedExternalDomains: externalDomains,
+		}, 400);
 	}
 	// Plus-addressing applies to INTERNAL delivery too: `someone+tag@` must land in
 	// `someone@`. Without this, agent-to-agent sends (the only send v0 supports)
@@ -469,8 +485,12 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	// feature would look broken on its most-used path. `to` keeps the tag below, so
 	// the recipient can still filter on it.
 	const toMailbox = mailboxOf(to);
-	// Recipient mailbox must already exist (internal delivery has no MX fallback).
-	if (!(await mailboxExists(c.env, toMailbox))) {
+	// Only INTERNAL delivery requires the recipient mailbox to exist — it has no MX
+	// fallback, so a missing mailbox means the mail would vanish. For external
+	// recipients we cannot know whether the address exists; that is the receiving
+	// server's job to answer (with a bounce), which is exactly the behaviour we
+	// just gave our own inbound path.
+	if (isInternal && !(await mailboxExists(c.env, toMailbox))) {
 		return c.json({ error: `Recipient mailbox does not exist: ${toMailbox}`, code: "NOT_FOUND" }, 404);
 	}
 	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit();
@@ -492,12 +512,43 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			{ key: "x-agentic-inbox-delivery", value: "internal" },
 		]),
 	};
-	// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
-	const toStub = mailboxStub(c.env, toMailbox);
-	await toStub.createEmail(Folders.INBOX, { id: messageId, ...common }, []);
-	await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
+	if (isInternal) {
+		// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
+		const toStub = mailboxStub(c.env, toMailbox);
+		await toStub.createEmail(Folders.INBOX, { id: messageId, ...common }, []);
+		await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
+		return c.json({ id: messageId, status: "sent", delivery: "internal" }, 202);
+	}
 
-	return c.json({ id: messageId, status: "sent", delivery: "internal" }, 202);
+	// External: hand to Cloudflare Email Sending. Failures are reported LOUDLY —
+	// a 202 must never mean "queued and maybe dropped", which is the exact lie we
+	// removed from the inbound path today.
+	try {
+		await sendEmail(c.env.EMAIL, {
+			to,
+			from,
+			subject,
+			html: reqBody.html ? content : undefined,
+			text: reqBody.html ? undefined : content,
+			headers: { "Message-ID": `<${outgoingMessageId}>` },
+		});
+	} catch (e) {
+		const msg = (e as Error).message || "unknown error";
+		console.error("External send failed:", msg);
+		return c.json({ error: `External send failed: ${msg}`, code: "SEND_FAILED", to }, 502);
+	}
+	// Only record it as Sent once the provider accepted it.
+	await c.var.mailboxStub.createEmail(Folders.SENT, {
+		id: crypto.randomUUID(),
+		...common,
+		raw_headers: JSON.stringify([
+			{ key: "from", value: from }, { key: "to", value: to },
+			{ key: "subject", value: subject }, { key: "date", value: now },
+			{ key: "message-id", value: `<${outgoingMessageId}>` },
+			{ key: "x-agentic-inbox-delivery", value: "external" },
+		]),
+	}, []);
+	return c.json({ id: messageId, status: "sent", delivery: "external", to }, 202);
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
