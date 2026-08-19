@@ -58,8 +58,18 @@ jobs:
       - run: npm ci
 
       # Gate BEFORE deploying: a red typecheck or test never reaches production.
+      # MUST be the repo's own script, not a bare `tsc -b`. The type definitions
+      # for `Env` (worker-configuration.d.ts) and the react-router route types are
+      # GENERATED and .gitignore'd, so a clean CI checkout does not have them —
+      # bare `tsc -b` then fails with "Property 'BUCKET' does not exist on type
+      # 'Env'". It passes on a dev machine only because the generated files are
+      # already sitting there, which is exactly what makes a bare tsc non-hermetic.
+      # `npm run typecheck` = cf-typegen && react-router typegen && tsc -b.
+      # Verified credential-free: generation reads wrangler.jsonc locally and
+      # succeeds while `wrangler whoami` reports unauthenticated, so this runs
+      # before the credential gate without needing secrets.
       - name: Typecheck
-        run: npx tsc -b
+        run: npm run typecheck
 
       - name: Test
         run: npm test
