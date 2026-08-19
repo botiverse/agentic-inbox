@@ -43,6 +43,15 @@ branches were converged. Hence this file, and hence the merge.
   `DOMAINS` (= mail.build), so those entries gate nothing for this domain — they
   are functional no-ops. Do not merge them just to make the branches look tidy.
 
+### One-time note after the branch merge
+
+The five mailbox addresses that had accumulated on `main` (`mobile-qa`, `hipp`,
+`huazai`, `martin`, `deepsuck`) enter the live configuration for the first time on
+the **next** deploy. They are still no-ops — `isAddressAllowed` passes anything
+under `DOMAINS` — so behaviour does not change. Do not read "they took effect
+after that deploy" as "those five commits had been working all along". They never
+shipped; they merely finally came along for the ride. (Gogo, 2026-08-19.)
+
 ## Deploying
 
 Manual only — a deploy is a decision, not a side effect of pushing.
