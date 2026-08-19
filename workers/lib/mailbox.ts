@@ -11,6 +11,7 @@ import { createMiddleware } from "hono/factory";
 import type { MailboxDO } from "../durableObject";
 import type { Env } from "../types";
 import { mailboxAccessAllowed } from "./auth";
+import { mailboxOf, mailboxKey, mailboxStub } from "./mailboxRef";
 
 export type MailboxContext = {
 	Bindings: Env;
@@ -32,11 +33,13 @@ export type MailboxContext = {
 export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) => {
 	const rawId = c.req.param("mailboxId");
 	if (!rawId) return c.json({ error: "Mailbox ID required", code: "BAD_REQUEST" }, 400);
-	const mailboxId = decodeURIComponent(rawId);
+	// Resolve through the one address→mailbox rule (mailboxRef), so a `+tag`
+	// sub-address addresses the mailbox it delivers to rather than looking like a
+	// separate, non-existent one. Every lookup below uses the resolved id.
+	const mailboxId = mailboxOf(decodeURIComponent(rawId));
 
 	// Verify mailbox exists (GET so we can read its owner for authorization).
-	const key = `mailboxes/${mailboxId}.json`;
-	const obj = await c.env.BUCKET.get(key);
+	const obj = await c.env.BUCKET.get(mailboxKey(mailboxId));
 	if (!obj) {
 		return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	}
@@ -62,12 +65,8 @@ export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) =
 		}
 	}
 
-	// Instantiate DO stub
-	const ns = c.env.MAILBOX;
-	const id = ns.idFromName(mailboxId);
-	const stub = ns.get(id);
-
-	c.set("mailboxStub", stub);
+	// Instantiate DO stub (same resolution rule — never the raw path param).
+	c.set("mailboxStub", mailboxStub(c.env, mailboxId));
 	
 	await next();
 });

@@ -3,6 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { AIChatAgent } from "@cloudflare/ai-chat";
+import { mailboxKey } from "../lib/mailboxRef";
 import {
 	streamText,
 	generateText,
@@ -93,7 +94,7 @@ Use discard_draft to delete drafts that the operator rejects or that are no long
  */
 async function getSystemPrompt(env: Env, mailboxId: string): Promise<string> {
 	try {
-		const key = `mailboxes/${mailboxId}.json`;
+		const key = mailboxKey(mailboxId);
 		const obj = await env.BUCKET.get(key);
 		if (obj) {
 			const settings = await obj.json<Record<string, unknown>>();

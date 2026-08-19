@@ -17,8 +17,8 @@ import {
 	getFullEmail,
 	unsupportedSendFields,
 	cleanSnippet,
-	deliveryMailbox,
 } from "./lib/email-helpers";
+import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
 import { maxMailboxesForPlan, planForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart } from "./lib/auth";
@@ -207,7 +207,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// Existence check runs BEFORE the quota gate: re-claiming a mailbox you
 	// already own is idempotent (never blocked by quota), a taken address is
 	// rejected cleanly, and an ownerless mailbox is adopted rather than 409'd.
-	const key = `mailboxes/${email}.json`;
+	const key = mailboxKey(email);
 	const existingObj = await c.env.BUCKET.get(key);
 	let existingSettings: (Record<string, unknown> & { owner?: string; fromName?: string }) | null = null;
 	if (existingObj) {
@@ -251,7 +251,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 
 	try {
 		await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
-		const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
+		const stub = mailboxStub(c.env, email);
 		await stub.getFolders();
 	} catch (e) {
 		// Don't leak a reserved slot if provisioning fails after reserving.
@@ -275,16 +275,18 @@ app.post("/api/v1/mailboxes", async (c) => {
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
-	const mailboxId = c.req.param("mailboxId")!;
-	const obj = await c.env.BUCKET.get(`mailboxes/${mailboxId}.json`);
+	// Resolve exactly as requireMailbox did — reading the raw param here would let
+	// authorization and the read target diverge for a `+tag` address.
+	const mailboxId = mailboxOf(c.req.param("mailboxId")!);
+	const obj = await c.env.BUCKET.get(mailboxKey(mailboxId));
 	if (!obj) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings: await obj.json() });
 });
 
 app.put("/api/v1/mailboxes/:mailboxId", async (c) => {
-	const mailboxId = c.req.param("mailboxId")!;
+	const mailboxId = mailboxOf(c.req.param("mailboxId")!);
 	const { settings } = (await c.req.json()) as { settings: Record<string, unknown> };
-	const key = `mailboxes/${mailboxId}.json`;
+	const key = mailboxKey(mailboxId);
 	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	await c.env.BUCKET.put(key, JSON.stringify(settings));
 	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings });
@@ -294,8 +296,8 @@ app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
 	// Ownership is enforced by requireMailbox; release the quota slot so the owner
 	// can reclaim it (dogfood: Duoyu — testers had no way to free a slot / clean up
 	// residue, so each trial permanently burned a mailbox against the quota).
-	const mailboxId = c.req.param("mailboxId")!;
-	const key = `mailboxes/${mailboxId}.json`;
+	const mailboxId = mailboxOf(c.req.param("mailboxId")!);
+	const key = mailboxKey(mailboxId);
 	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	await c.env.BUCKET.delete(key); // TODO: also delete DO data and R2 attachment blobs
 	const owner = c.get("authOwner");
@@ -466,9 +468,9 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	// would 404 on any tagged recipient even though inbound SMTP delivers it — the
 	// feature would look broken on its most-used path. `to` keeps the tag below, so
 	// the recipient can still filter on it.
-	const toMailbox = deliveryMailbox(to);
+	const toMailbox = mailboxOf(to);
 	// Recipient mailbox must already exist (internal delivery has no MX fallback).
-	if (!(await c.env.BUCKET.head(`mailboxes/${toMailbox}.json`))) {
+	if (!(await mailboxExists(c.env, toMailbox))) {
 		return c.json({ error: `Recipient mailbox does not exist: ${toMailbox}`, code: "NOT_FOUND" }, 404);
 	}
 	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit();
@@ -491,7 +493,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 		]),
 	};
 	// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
-	const toStub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(toMailbox));
+	const toStub = mailboxStub(c.env, toMailbox);
 	await toStub.createEmail(Folders.INBOX, { id: messageId, ...common }, []);
 	await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
 
@@ -701,8 +703,8 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 	// Plus-addressing: `artin+staging-smoke@` delivers to `artin@`. Only the mailbox
 	// LOOKUP is normalized — `recipient` below keeps every original address, tag
 	// included, so the recipient can still filter on it (AX: artin).
-	const deliveryAddress = deliveryMailbox(mailboxId);
-	if (!(await env.BUCKET.head(`mailboxes/${deliveryAddress}.json`))) {
+	const deliveryAddress = mailboxOf(mailboxId);
+	if (!(await mailboxExists(env, deliveryAddress))) {
 		// Unknown mailbox → permanent SMTP error to the connecting server, which
 		// tells its own user. Previously this returned silently: the sender got a
 		// 250 and the mail vanished with no bounce and no way for us to notify them
@@ -731,7 +733,7 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 		return;
 	}
 
-	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(deliveryAddress));
+	const stub = mailboxStub(env, deliveryAddress);
 
 	const attachmentData: StoredAttachment[] = [];
 	if (parsedEmail.attachments) {
@@ -773,10 +775,9 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 	// instruction" discipline (stdrc). Only fire when the mailbox explicitly enables
 	// `autoDraft`. Direction is MCP-forward — a user's own agent manages the mail —
 	// over a built-in model.
-	const mboxObj = await env.BUCKET.get(`mailboxes/${deliveryAddress}.json`);
-	const mboxSettings = mboxObj ? ((await mboxObj.json().catch(() => null)) as { autoDraft?: { enabled?: boolean } } | null) : null;
+	const mboxSettings = await readMailboxSettings<{ autoDraft?: { enabled?: boolean } }>(env, deliveryAddress);
 	if (mboxSettings?.autoDraft?.enabled === true) {
-		const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(deliveryAddress));
+		const agentStub = emailAgentStub(env, deliveryAddress);
 		ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
 			method: "POST", headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ mailboxId: deliveryAddress, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
