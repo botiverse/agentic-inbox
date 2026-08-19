@@ -10,32 +10,63 @@
 import { createMiddleware } from "hono/factory";
 import type { MailboxDO } from "../durableObject";
 import type { Env } from "../types";
+import { mailboxAccessAllowed } from "./auth";
+import { mailboxOf, mailboxKey, mailboxStub } from "./mailboxRef";
 
 export type MailboxContext = {
 	Bindings: Env;
 	Variables: {
 		mailboxStub: DurableObjectStub<MailboxDO>;
+		// Set by the auth middleware (workers/app.ts). `authOwner` is the resolved
+		// caller identity (an accountId / raft:${server_id}:${type}:${sub}, or
+		// "local:admin"); `authScope` is the presented key's scope (a mailbox id,
+		// "account", or "admin"); `authIsAdmin` short-circuits ownership checks.
+		authOwner?: string;
+		authScope?: string;
+		authIsAdmin?: boolean;
+		// The caller's raft handle (userinfo preferred_username), set from the
+		// session by the OAuth middleware. Used for claim namespace enforcement.
+		authHandle?: string;
 	};
 };
 
 export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) => {
 	const rawId = c.req.param("mailboxId");
-	if (!rawId) return c.json({ error: "Mailbox ID required" }, 400);
-	const mailboxId = decodeURIComponent(rawId);
+	if (!rawId) return c.json({ error: "Mailbox ID required", code: "BAD_REQUEST" }, 400);
+	// Resolve through the one address→mailbox rule (mailboxRef), so a `+tag`
+	// sub-address addresses the mailbox it delivers to rather than looking like a
+	// separate, non-existent one. Every lookup below uses the resolved id.
+	const mailboxId = mailboxOf(decodeURIComponent(rawId));
 
-	// Verify mailbox exists
-	const key = `mailboxes/${mailboxId}.json`;
-	const obj = await c.env.BUCKET.head(key);
+	// Verify mailbox exists (GET so we can read its owner for authorization).
+	const obj = await c.env.BUCKET.get(mailboxKey(mailboxId));
 	if (!obj) {
-		return c.json({ error: "Not found" }, 404);
+		return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	}
 
-	// Instantiate DO stub
-	const ns = c.env.MAILBOX;
-	const id = ns.idFromName(mailboxId);
-	const stub = ns.get(id);
+	// Owner-scoped access: enforce for scoped-key callers. Legacy callers (CF
+	// Access human session with no scope) pass through during the transition.
+	const authScope = c.get("authScope");
+	if (authScope) {
+		const settings = (await obj.json().catch(() => ({}))) as { owner?: string };
+		const allowed = mailboxAccessAllowed(
+			{ owner: c.get("authOwner") ?? "", scope: authScope },
+			{ id: mailboxId, owner: settings.owner ?? null },
+		);
+		if (!allowed) {
+			// Distinguish an ownerless (never-claimed) mailbox — recoverable by
+			// claiming it — from one owned by someone else. Collapsing both into a
+			// bare 403 made the raft CLI report "session expired / re-login", which
+			// fixes neither (dogfood: Duoyu).
+			if (!settings.owner) {
+				return c.json({ error: "Mailbox is not linked to any account; claim it first to gain access", code: "MAILBOX_NOT_LINKED" }, 403);
+			}
+			return c.json({ error: "Forbidden: this key is not scoped to this mailbox", code: "FORBIDDEN" }, 403);
+		}
+	}
 
-	c.set("mailboxStub", stub);
+	// Instantiate DO stub (same resolution rule — never the raw path param).
+	c.set("mailboxStub", mailboxStub(c.env, mailboxId));
 	
 	await next();
 });

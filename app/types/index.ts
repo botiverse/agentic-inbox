@@ -28,14 +28,19 @@ export interface Email {
 	thread_id?: string | null;
 	folder_id?: string | null;
 	subject: string;
-	sender: string;
-	recipient: string;
+	// Canonical email semantics (first-principles): from/to, not the DO storage
+	// column names sender/recipient which used to leak into the API (tygg — break
+	// freely pre-launch). Body is body_html (HTML or null) + body_text (stripped,
+	// grep-able); the raw `body` field is gone (redundant). (AX: Yingjun.)
+	from: string;
+	to: string;
 	cc?: string;
 	bcc?: string;
 	date: string;
 	read: boolean;
 	starred: boolean;
-	body?: string | null;
+	body_html?: string | null;
+	body_text?: string | null;
 	in_reply_to?: string | null;
 	email_references?: string | null;
 	message_id?: string | null;

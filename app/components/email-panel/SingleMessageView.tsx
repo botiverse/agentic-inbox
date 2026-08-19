@@ -4,7 +4,7 @@
 
 import EmailAttachmentList from "~/components/EmailAttachmentList";
 import EmailIframe from "~/components/EmailIframe";
-import { formatDetailDate, rewriteInlineImages } from "~/lib/utils";
+import { formatDetailDate, rewriteInlineImages, emailBodyHtml } from "~/lib/utils";
 import type { Email } from "~/types";
 
 interface SingleMessageViewProps {
@@ -24,13 +24,13 @@ export default function SingleMessageView({
 				<div className="flex items-center justify-between gap-3">
 					<div className="flex items-center gap-2.5 min-w-0">
 						<div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-kumo-fill text-xs font-bold text-kumo-default">
-							{email.sender.charAt(0).toUpperCase()}
+							{email.from.charAt(0).toUpperCase()}
 						</div>
 						<div className="min-w-0">
 							<div className="text-sm font-medium text-kumo-default truncate">
-								{email.sender}
+								{email.from}
 							</div>
-							<div className="text-xs text-kumo-subtle">To: {email.recipient}</div>
+							<div className="text-xs text-kumo-subtle">To: {email.to}</div>
 						</div>
 					</div>
 					<span className="text-xs text-kumo-subtle shrink-0">
@@ -42,7 +42,7 @@ export default function SingleMessageView({
 			<div className="flex-1 min-h-0">
 				<EmailIframe
 					body={rewriteInlineImages(
-						email.body || "",
+						emailBodyHtml(email),
 						mailboxId || "",
 						email.id,
 						email.attachments,

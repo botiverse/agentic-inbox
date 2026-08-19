@@ -29,8 +29,17 @@ export function useCreateMailbox() {
 	return useMutation({
 		mutationFn: ({ email, name }: { email: string; name: string }) =>
 			api.createMailbox(email, name),
-		onSuccess: () => {
-			qc.invalidateQueries({ queryKey: queryKeys.mailboxes.all });
+		onSuccess: (data) => {
+			// Optimistically add the just-claimed mailbox so it appears immediately.
+			// The list endpoint's per-owner KV index is eventually consistent
+			// (~<=60s), so a plain invalidate+refetch wouldn't show it right away.
+			if (data?.id) {
+				qc.setQueryData<Mailbox[]>(queryKeys.mailboxes.all, (old) => {
+					const list = old ?? [];
+					if (list.some((m) => m.id === data.id)) return list;
+					return [...list, { id: data.id, email: data.email, name: data.name } as Mailbox];
+				});
+			}
 		},
 	});
 }

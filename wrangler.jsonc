@@ -14,6 +14,25 @@
 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
 		// The worker now fails closed outside local development if Access is not configured.
 		"DOMAINS": "mail.build",
+		// External domains we may send TO. Deliberately narrow for the first
+		// outbound rollout (artin 2026-08-19): we had never sent externally, so
+		// deliverability was unmeasured. Widen once a real Authentication-Results
+		// confirms SPF/DKIM alignment.
+		"EXTERNAL_SEND_DOMAINS": "gmail.com,botiverse.dev,cat.ms,oranix.io",
+		// Per-agent auth (task #1). PRO_SERVER_IDS = comma-separated raft server_ids
+		// on the pro tier (pro=10 mailboxes/agent, free=1). RAFT_OAUTH_* = Login with
+		// Raft Connected App; CLIENT_SECRET is set via `wrangler secret`, not here.
+		"PRO_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
+		// Login gated to these raft server_ids (v0: botiverse-only, tygg 2026-07-15).
+		// Empty = unrestricted. Enforce in the OAuth callback via serverAllowed().
+		"ALLOWED_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
+		// RAFT_OAUTH_CLIENT_KEY = the PUBLIC Connected-App client key (e.g. "agentic-inbox").
+		// Used for BOTH the setup client_id AND token-endpoint Basic auth — NEVER the
+		// internal app UUID (that mismatch was the slock-internal-dashboard PR #66 403).
+		// RAFT_OAUTH_CLIENT_SECRET + RAFT_SESSION_SECRET are wrangler secrets (not here).
+		"RAFT_OAUTH_CLIENT_KEY": "agentic-inbox",
+		"RAFT_API_ORIGIN": "https://api.raft.build",
+		"RAFT_APP_ORIGIN": "https://app.raft.build",
 		"EMAIL_ADDRESSES": [
 			"gogo@mail.build",
 			"mobile-qa@mail.build",
@@ -165,6 +184,14 @@
 	"ai": {
 		"binding": "AI"
 	},
+	// Per-agent access-key registry (task #1). @Gogo: mint the namespace
+	// (`wrangler kv namespace create agentic-inbox-keys`) and fill the id.
+	"kv_namespaces": [
+		{
+			"binding": "AGENTIC_INBOX_KEYS",
+			"id": "bbf03eefcab5455f9efb4496dc532a40"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{
@@ -178,6 +205,10 @@
 			{
 				"name": "EMAIL_MCP",
 				"class_name": "EmailMCP"
+			},
+			{
+				"name": "OWNER",
+				"class_name": "OwnerDO"
 			}
 		]
 	},
@@ -198,6 +229,12 @@
 			"tag": "v3",
 			"new_sqlite_classes": [
 				"EmailMCP"
+			]
+		},
+		{
+			"tag": "v4",
+			"new_sqlite_classes": [
+				"OwnerDO"
 			]
 		}
 	]

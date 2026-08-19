@@ -40,8 +40,8 @@ function getSourceHeaders(msg: Email): { key: string; value: string }[] {
 	}
 
 	const headers: { key: string; value: string }[] = [];
-	if (msg.sender) headers.push({ key: "From", value: msg.sender });
-	if (msg.recipient) headers.push({ key: "To", value: msg.recipient });
+	if (msg.from) headers.push({ key: "From", value: msg.from });
+	if (msg.to) headers.push({ key: "To", value: msg.to });
 	if (msg.cc) headers.push({ key: "Cc", value: msg.cc });
 	if (msg.bcc) headers.push({ key: "Bcc", value: msg.bcc });
 	if (msg.subject) headers.push({ key: "Subject", value: msg.subject });

@@ -3,6 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { McpAgent } from "agents/mcp";
+import { mailboxKey } from "../lib/mailboxRef";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
@@ -75,7 +76,7 @@ export class EmailMCP extends McpAgent<Env> {
 		 * Returns an MCP error response if the mailbox is not found, or null if valid.
 		 */
 		const verifyMailbox = async (mailboxId: string) => {
-			const obj = await env.BUCKET.head(`mailboxes/${mailboxId}.json`);
+			const obj = await env.BUCKET.head(mailboxKey(mailboxId));
 			if (!obj) {
 				return mcpError(`Mailbox "${mailboxId}" not found. Use list_mailboxes to see available mailboxes.`);
 			}

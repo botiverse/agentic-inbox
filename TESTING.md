@@ -2,6 +2,18 @@
 
 Two layers, by design.
 
+## Deploy hygiene (read before shipping)
+
+Deploy with **`npm run deploy`** (= `npm run build && wrangler deploy`). Do **NOT**
+run a bare `wrangler deploy`: it ships the stale prebuilt `build/` artifact (the
+react-router/Vite output) without rebuilding, so your source changes don't go
+live — while the deploy still prints "Deployed, new Version ID". **A version-ID
+bump is NOT evidence the code changed.** Always verify a deploy *behaviorally*
+(curl/​invoke the live action and read the response), never by the receipt. To
+confirm what's in a bundle without deploying: `wrangler deploy --dry-run --outdir
+/tmp/out` then grep. (Learned the hard way — Gogo, 2026-07-15: a backfill deploy
+looked green for two runs but shipped stale code; caught only by a behavioral read.)
+
 ## Layer A — hermetic unit tests (gate every commit / PR)
 
 Fast, deterministic, no Cloudflare bindings or network.

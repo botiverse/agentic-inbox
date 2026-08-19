@@ -5,7 +5,9 @@ import { defineConfig } from "vitest/config";
 // Miniflare bindings are tracked as a fast-follow via @cloudflare/vitest-pool-workers.
 export default defineConfig({
 	test: {
-		include: ["workers/**/*.test.ts"],
+		// `shared/` is imported by BOTH the worker and the web UI, so its tests
+		// must run too — the mailbox-identity rule lives there.
+		include: ["workers/**/*.test.ts", "shared/**/*.test.ts"],
 		environment: "node",
 	},
 });

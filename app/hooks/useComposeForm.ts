@@ -11,12 +11,12 @@ import {
 	getSignatureBlock,
 	htmlToPlainText,
 	splitEmailList,
-	stripHtml,
 	toEmailListValue,
 } from "~/lib/utils";
 import { useDeleteEmail, useForwardEmail, useReplyToEmail, useSaveDraft, useSendEmail } from "~/queries/emails";
 import { useMailbox } from "~/queries/mailboxes";
 import { useUIStore } from "~/hooks/useUIStore";
+import { sameMailbox, receivedAtAddress } from "shared/addresses";
 
 function appendUniqueAddress(
 	addresses: string[],
@@ -28,7 +28,11 @@ function appendUniqueAddress(
 	if (!trimmed) return;
 
 	const normalized = trimmed.toLowerCase();
-	if (normalized === exclude || seen.has(normalized)) return;
+	// Compare by MAILBOX, not by literal string: mail addressed to a `+tag`
+	// sub-address of your own mailbox (`me+shop@x` vs `me@x`) is still you, and a
+	// plain !== check would put your own address in the reply-all recipients
+	// (only reachable once plus-addressed mail started being delivered).
+	if ((exclude && sameMailbox(normalized, exclude)) || seen.has(normalized)) return;
 
 	seen.add(normalized);
 	addresses.push(trimmed);
@@ -63,9 +67,9 @@ function buildForwardBody(
 	original: NonNullable<ReturnType<typeof useUIStore.getState>["composeOptions"]["originalEmail"]>,
 	sigBlock: string,
 ) {
-	const safeSender = escapeHtml(original.sender);
+	const safeSender = escapeHtml(original.from);
 	const safeSubject = escapeHtml(original.subject);
-	const safeBody = escapeHtml(stripHtml(original.body || "")).replace(/\n/g, "<br>");
+	const safeBody = escapeHtml(original.body_text || "").replace(/\n/g, "<br>");
 
 	return `<p><br></p>${sigBlock ? `${sigBlock}<br>` : ""}<div style="border: 1px solid #ddd; padding: 1em; background-color: #f9f9f9; margin: 1em 0;"><strong>Forwarded message:</strong><br><strong>From:</strong> ${safeSender}<br><strong>Date:</strong> ${formatComposeDate(original.date)}<br><strong>Subject:</strong> ${safeSubject}<br><br>${safeBody}</div>`;
 }
@@ -76,9 +80,9 @@ function buildReplyAllFields(
 ) {
 	const toRecipients: string[] = [];
 	const toSeen = new Set<string>();
-	appendUniqueAddress(toRecipients, toSeen, original.sender, selfAddress);
+	appendUniqueAddress(toRecipients, toSeen, original.from, selfAddress);
 
-	for (const recipient of splitEmailList(original.recipient)) {
+	for (const recipient of splitEmailList(original.to)) {
 		appendUniqueAddress(toRecipients, toSeen, recipient, selfAddress);
 	}
 
@@ -87,7 +91,7 @@ function buildReplyAllFields(
 	for (const recipient of splitEmailList(original.cc)) {
 		const normalized = recipient.toLowerCase();
 		if (
-			normalized === selfAddress ||
+			(selfAddress && sameMailbox(normalized, selfAddress)) ||
 			toSeen.has(normalized) ||
 			ccSeen.has(normalized)
 		) {
@@ -113,12 +117,12 @@ function buildInitialComposeFields(
 
 	if (draft) {
 		return {
-			to: draft.recipient || "",
+			to: draft.to || "",
 			cc: draft.cc || "",
 			bcc: draft.bcc || "",
 			showCcBcc: Boolean(draft.cc || draft.bcc),
 			subject: draft.subject || "",
-			body: draft.body || "",
+			body: draft.body_html || "",
 		};
 	}
 
@@ -132,9 +136,9 @@ function buildInitialComposeFields(
 	if (mode === "reply") {
 		return {
 			...EMPTY_FIELDS,
-			to: original.sender,
+			to: original.from,
 			subject: getPrefixedSubject(original.subject, "Re"),
-			body: `<p><br></p>${sigBlock ? `${sigBlock}<br>` : ""}${buildQuotedReplyBlock(original.date, original.sender, original.body || "")}`,
+			body: `<p><br></p>${sigBlock ? `${sigBlock}<br>` : ""}${buildQuotedReplyBlock(original.date, original.from, original.body_html || "")}`,
 		};
 	}
 
@@ -144,7 +148,7 @@ function buildInitialComposeFields(
 			...EMPTY_FIELDS,
 			...recipients,
 			subject: getPrefixedSubject(original.subject, "Re"),
-			body: `<p><br></p>${sigBlock ? `${sigBlock}<br>` : ""}${buildQuotedReplyBlock(original.date, original.sender, original.body || "")}`,
+			body: `<p><br></p>${sigBlock ? `${sigBlock}<br>` : ""}${buildQuotedReplyBlock(original.date, original.from, original.body_html || "")}`,
 		};
 	}
 
@@ -239,7 +243,15 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 		if (toRecipients.length === 0) { setError("Add at least one recipient."); return; }
 		const ccRecipients = splitEmailList(cc); const bccRecipients = splitEmailList(bcc);
 		const fromName = currentMailbox.settings?.fromName || currentMailbox.name;
-		const from = fromName && fromName !== currentMailbox.email ? { email: currentMailbox.email, name: fromName } : currentMailbox.email;
+		// Reply/forward AS the address the sender actually wrote to, preserving any
+		// `+tag`, so the alias stays the identity they know and the base address is
+		// not disclosed (artin's call — the Proton behaviour). A plain compose, or a
+		// message that carries no address of ours (Bcc), falls back to the mailbox.
+		const original = composeOptions.originalEmail;
+		const sendAs = original
+			? receivedAtAddress([original.to, original.cc].filter(Boolean).join(", "), currentMailbox.email)
+			: currentMailbox.email;
+		const from = fromName && fromName !== sendAs ? { email: sendAs, name: fromName } : sendAs;
 		const emailData = {
 			to: toEmailListValue(toRecipients),
 			cc: toEmailListValue(ccRecipients),
