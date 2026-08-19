@@ -7,6 +7,12 @@
 # carries its OWN scoped credential, so "deploy" is an action anyone authorized
 # can trigger without borrowing an identity.
 #
+# THE GATE IS WHO CAN DISPATCH. This workflow deliberately does not restrict which
+# ref may be deployed (you must be able to ship a hotfix branch), so the only
+# control is GitHub's "who may run this workflow" permission. Do not read the
+# existence of CI as "CI constrains what reaches production" — it does not; the
+# repo's actor permissions do. (raised by Gogo in review of PR #8)
+#
 # ONE-TIME HUMAN SETUP (cannot be done from here — needs Cloudflare access):
 #   gh secret set CLOUDFLARE_API_TOKEN   # Workers Scripts:Edit on the botiverse account
 #   gh secret set CLOUDFLARE_ACCOUNT_ID  # target account id
@@ -82,6 +88,32 @@ jobs:
             exit 1
           fi
 
+      # `wrangler deploy` reads the wrangler config from the CHECKED-OUT ref, not
+      # from the branch this workflow file lives on. A dispatch of some other ref
+      # whose config carries a different `name` would deploy successfully — to a
+      # DIFFERENT worker. Assert the target before writing anything. (Gogo has
+      # paid for this exact shape: a trigger deploys the script it is bound to,
+      # not the config you were looking at.)
+      - name: Assert deploy target
+        run: |
+          cat > /tmp/worker-name.cjs <<'NODE'
+          const fs = require("fs");
+          // wrangler.jsonc is JSONC: whole-line // comments, block comments and
+          // trailing commas are all legal and all reject JSON.parse. Only strip
+          // WHOLE-LINE // comments, so `https://…` inside values survives.
+          const json = fs.readFileSync("wrangler.jsonc", "utf8")
+            .replace(/^\s*\/\/.*$/gm, "")
+            .replace(/\/\*[\s\S]*?\*\//g, "")
+            .replace(/,(\s*[}\]])/g, "$1");
+          process.stdout.write(String(JSON.parse(json).name || ""));
+          NODE
+          name=$(node /tmp/worker-name.cjs)
+          echo "wrangler.jsonc name = ${name:-<empty>}"
+          if [ "$name" != "agentic-inbox" ]; then
+            echo "::error::Refusing to deploy: wrangler.jsonc in this ref targets worker '${name:-<empty>}', expected 'agentic-inbox'. Deploying would have written to a different worker."
+            exit 1
+          fi
+
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -97,7 +129,7 @@ jobs:
           EXPECTED: ${{ steps.sha.outputs.short }}
         run: |
           for i in $(seq 1 30); do
-            running=$(curl -fsS https://mail.build/health | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' || true)
+            running=$(curl -fsS https://mail.build/health | jq -r '.version // empty' || true)
             echo "attempt $i: running=${running:-<none>} expected=$EXPECTED"
             if [ "$running" = "$EXPECTED" ]; then
               echo "✅ running version matches deployed SHA"
