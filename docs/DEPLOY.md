@@ -1,8 +1,13 @@
 # Deploying agentic-inbox
 
-## The one thing that surprises everyone
+## Deploy from `main`
 
-**Production is deployed from `feat/raft-oauth-session`, NOT from `main`.**
+**As of 2026-08-19, `main` is the deploy branch.** Cut deploys from it.
+
+### The history, because it will confuse you otherwise
+
+Until that date, production was deployed from `feat/raft-oauth-session` and never
+from `main` — an accident that hardened into a convention.
 
 Verified 2026-08-19 — every known deployed SHA is on that branch and on neither
 `main` nor any of its ancestors:
@@ -14,13 +19,16 @@ $ git merge-base --is-ancestor e124b2c origin/feat/raft-oauth-session  # → YES
 (same for `3d10d00` and `e973bbe`, the two deploys before it)
 
 Nobody on the team could state this from memory, and it cost a deploy-time stop
-while four people re-derived it. Hence this file.
+while four people re-derived it — twice, in opposite directions. artin then asked
+the obvious question nobody had ("shouldn't it just be merged?"), and the two
+branches were converged. Hence this file, and hence the merge.
 
 ### Consequences
 
-- A commit landing on `main` **does not ship**. Several mailbox-provisioning
-  commits sit on `main` having never been deployed; their authors likely believe
-  otherwise. They happen to be harmless — see below — but the pattern is not.
+- **Historically** a commit landing on `main` did **not** ship: several
+  mailbox-provisioning commits sat there undeployed while their authors
+  reasonably believed otherwise. That is fixed — they were merged in — but it is
+  the exact failure mode to watch for if the branches ever diverge again.
 - `.github/workflows/deploy.yml` lives on `main` anyway, because GitHub only
   offers `workflow_dispatch` for workflows on the **default** branch. The
   workflow's `ref` input is what selects the code to deploy. **CI living on main
