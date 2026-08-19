@@ -415,8 +415,12 @@ app.all("*", (c) => {
 // Export the Hono app as the default export with an email handler
 export default {
 	fetch: app.fetch,
+	// `event` is Cloudflare's ForwardableEmailMessage. We previously declared it as
+	// just `{raw, rawSize}`, which typed away `setReject` — the very capability
+	// needed to refuse unknown recipients in-session instead of accepting them and
+	// dropping them silently. Keep `setReject` in the type.
 	async email(
-		event: { raw: ReadableStream; rawSize: number },
+		event: { raw: ReadableStream; rawSize: number; setReject?: (reason: string) => void },
 		env: Env,
 		ctx: ExecutionContext,
 	) {

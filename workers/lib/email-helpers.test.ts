@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet, snippetFromFullBody } from "./email-helpers";
+import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet, snippetFromFullBody, deliveryMailbox } from "./email-helpers";
 
 describe("getFullEmail body_html is raw (XSS guard — dogfood: Duoyu)", () => {
 	// A sender safely-escaped `<script>` as display text. body_html is rendered,
@@ -155,5 +155,32 @@ describe("snippetFromFullBody (durable ingest snippet — Gogo semantics)", () =
 	it("handles null/empty", () => {
 		expect(snippetFromFullBody(null)).toBe("");
 		expect(snippetFromFullBody("")).toBe("");
+	});
+});
+
+describe("deliveryMailbox (plus-addressing — AX: artin)", () => {
+	it("strips a +tag so sub-addresses deliver to the base mailbox", () => {
+		expect(deliveryMailbox("artin+staging-smoke@mail.build")).toBe("artin@mail.build");
+		expect(deliveryMailbox("artin+test@mail.build")).toBe("artin@mail.build");
+	});
+	it("leaves ordinary addresses untouched", () => {
+		expect(deliveryMailbox("artin@mail.build")).toBe("artin@mail.build");
+		expect(deliveryMailbox("postel-ci@mail.build")).toBe("postel-ci@mail.build");
+	});
+	it("strips from the FIRST + (everything after is tag)", () => {
+		expect(deliveryMailbox("a+b+c@mail.build")).toBe("a@mail.build");
+	});
+	it("keeps a tag-only local-part unchanged (never resolves to an empty mailbox)", () => {
+		// `+tag@` would strip to `@mail.build`; leave it so it falls through to the
+		// normal no-such-mailbox reject instead of resolving somewhere unintended.
+		expect(deliveryMailbox("+tag@mail.build")).toBe("+tag@mail.build");
+	});
+	it("handles malformed input without inventing an address", () => {
+		expect(deliveryMailbox("notanaddress")).toBe("notanaddress");
+		expect(deliveryMailbox("@mail.build")).toBe("@mail.build");
+		expect(deliveryMailbox("")).toBe("");
+	});
+	it("a + in the DOMAIN is not treated as a tag", () => {
+		expect(deliveryMailbox("user@ma+il.build")).toBe("user@ma+il.build");
 	});
 });

@@ -17,6 +17,7 @@ import {
 	getFullEmail,
 	unsupportedSendFields,
 	cleanSnippet,
+	deliveryMailbox,
 } from "./lib/email-helpers";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
@@ -160,6 +161,16 @@ app.post("/api/v1/mailboxes", async (c) => {
 		return c.json({ error: `email must be a single address of the form <local-part>@<domain>.${nsHint}`, code: "BAD_REQUEST", namespace: namespace || undefined }, 400);
 	}
 	if (!isValidAsciiLocalPart(localPart)) {
+		// A `+tag` address isn't a separate mailbox to claim — it already delivers to
+		// the base mailbox. Say that instead of a bare "invalid local-part" (AX: artin).
+		if (localPart.includes("+")) {
+			const base = localPart.split("+")[0];
+			return c.json({
+				error: `\`+\` addresses are sub-addresses of your main mailbox, not separate mailboxes — you don't claim them. Anything sent to ${localPart}@${email.slice(atIdx + 1)} already arrives in ${base}@${email.slice(atIdx + 1)} (the full tagged address is kept on the message so you can filter on it).${base ? ` Claim \`${base}@${email.slice(atIdx + 1)}\` if you haven't already.` : ""}`,
+				code: "PLUS_ADDRESS_NOT_CLAIMABLE",
+				deliversTo: base ? `${base}@${email.slice(atIdx + 1)}` : undefined,
+			}, 400);
+		}
 		return c.json({ error: `Mailbox local-part must be ASCII (letters, digits, . _ -).${nsHint}`, code: "INVALID_LOCALPART", namespace: namespace || undefined }, 400);
 	}
 
@@ -632,7 +643,29 @@ async function streamToArrayBuffer(stream: ReadableStream, streamSize: number) {
 	return result;
 }
 
-async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env: Env, ctx: ExecutionContext) {
+/** The subset of Cloudflare's ForwardableEmailMessage we use. `setReject` returns
+ * a permanent SMTP error to the CONNECTING SERVER during the session — we never
+ * generate a bounce message ourselves. That distinction is the whole ballgame:
+ * accepting-then-mailing-a-bounce would make us a backscatter source (spam forges
+ * the From, so our "bounce" lands on an innocent third party and mail.build gets
+ * blacklisted — and our catch-all means unknown-recipient probes hit this path
+ * constantly). In-session reject sends zero mail. (infra review: Gogo.) */
+type InboundEmailMessage = {
+	raw: ReadableStream;
+	rawSize: number;
+	setReject?: (reason: string) => void;
+};
+
+/** Reject in-session when we can; otherwise fall back to a log (never a bounce). */
+function rejectInbound(event: InboundEmailMessage, reason: string) {
+	if (typeof event.setReject === "function") {
+		event.setReject(reason);
+		return;
+	}
+	console.log(`Cannot setReject (unavailable); dropping instead: ${reason}`);
+}
+
+async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: ExecutionContext) {
 	const rawEmail = await streamToArrayBuffer(event.raw, event.rawSize);
 	const parsedEmail = await new PostalMime().parse(rawEmail);
 
@@ -649,14 +682,50 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 		// Accept a recipient that is explicitly allowlisted OR under a configured domain.
 		// Mailbox existence (checked below) remains the real delivery gate.
 		mailboxId = allRecipients.find((addr) => isAddressAllowed(addr, allowedAddresses, allowedDomains));
-		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES or DOMAINS.`); return; }
+		if (!mailboxId) {
+			// Not an address we serve at all. Say so in-session rather than accepting
+			// and dropping (the old behaviour told the sender 250 = "delivered").
+			rejectInbound(event, "No such recipient at this domain");
+			return;
+		}
 	} else { mailboxId = allRecipients[0]; }
 	if (!mailboxId) throw new Error("received email with no valid recipient address");
 
 	const messageId = crypto.randomUUID();
-	if (!(await env.BUCKET.head(`mailboxes/${mailboxId}.json`))) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
+	// Plus-addressing: `artin+staging-smoke@` delivers to `artin@`. Only the mailbox
+	// LOOKUP is normalized — `recipient` below keeps every original address, tag
+	// included, so the recipient can still filter on it (AX: artin).
+	const deliveryAddress = deliveryMailbox(mailboxId);
+	if (!(await env.BUCKET.head(`mailboxes/${deliveryAddress}.json`))) {
+		// Unknown mailbox → permanent SMTP error to the connecting server, which
+		// tells its own user. Previously this returned silently: the sender got a
+		// 250 and the mail vanished with no bounce and no way for us to notify them
+		// (catch-all → Worker is the only delivery path, so there is no safety net).
+		//
+		// ┌── KNOWN AND ACCEPTED TRADE-OFF (decided 2026-08-18, #proj-mail thread
+		// │   3479a648 — artin product call, Gogo infra review, Postel implementing).
+		// │   DO NOT "fix" this by reverting to a silent accept-and-drop.
+		// │
+		// │   Rejecting in-session reveals whether a given mailbox EXISTS, which is a
+		// │   real increase in exposure: today the catch-all accepts everything with a
+		// │   250, so a prober cannot tell live addresses from dead ones. After this
+		// │   change they can (standard directory-harvesting surface).
+		// │
+		// │   We accept it because the alternative is worse and unrecoverable: silent
+		// │   dropping tells a LEGITIMATE sender "delivered" when nothing was, with no
+		// │   bounce — and the deceived party is outside our system (a signup flow, a
+		// │   verification email), so we can neither detect it nor correct it after the
+		// │   fact. Every conventional mail server rejects unknown recipients (550).
+		// │
+		// │   If this surface ever needs reducing, do it WITHOUT restoring the silent
+		// │   drop — e.g. rate-limit or tarpit repeated unknown-recipient probes per
+		// │   connecting IP, which cuts enumeration while keeping honest senders informed.
+		// └──
+		rejectInbound(event, `No such mailbox: ${deliveryAddress}`);
+		return;
+	}
 
-	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
+	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(deliveryAddress));
 
 	const attachmentData: StoredAttachment[] = [];
 	if (parsedEmail.attachments) {
@@ -698,13 +767,13 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 	// instruction" discipline (stdrc). Only fire when the mailbox explicitly enables
 	// `autoDraft`. Direction is MCP-forward — a user's own agent manages the mail —
 	// over a built-in model.
-	const mboxObj = await env.BUCKET.get(`mailboxes/${mailboxId}.json`);
+	const mboxObj = await env.BUCKET.get(`mailboxes/${deliveryAddress}.json`);
 	const mboxSettings = mboxObj ? ((await mboxObj.json().catch(() => null)) as { autoDraft?: { enabled?: boolean } } | null) : null;
 	if (mboxSettings?.autoDraft?.enabled === true) {
-		const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
+		const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(deliveryAddress));
 		ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
 			method: "POST", headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
+			body: JSON.stringify({ mailboxId: deliveryAddress, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
 		})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
 	}
 }
