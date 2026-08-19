@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet, snippetFromFullBody, deliveryMailbox } from "./email-helpers";
+import { validateSender, SenderValidationError } from "./email-helpers";
 
 describe("getFullEmail body_html is raw (XSS guard — dogfood: Duoyu)", () => {
 	// A sender safely-escaped `<script>` as display text. body_html is rendered,
@@ -182,5 +183,27 @@ describe("deliveryMailbox (plus-addressing — AX: artin)", () => {
 	});
 	it("a + in the DOMAIN is not treated as a tag", () => {
 		expect(deliveryMailbox("user@ma+il.build")).toBe("user@ma+il.build");
+	});
+});
+
+describe("validateSender: may send AS a +tag of the mailbox (artin's call)", () => {
+	const box = "artin@mail.build";
+
+	it("accepts the mailbox address itself", () => {
+		expect(validateSender("x@y.test", box, box).fromEmail).toBe(box);
+	});
+
+	it("accepts a +tag sub-address, so replies keep the alias identity", () => {
+		expect(validateSender("x@y.test", "artin+shop@mail.build", box).fromEmail).toBe("artin+shop@mail.build");
+	});
+
+	it("still REJECTS another mailbox (relaxing the tag must not open impersonation)", () => {
+		expect(() => validateSender("x@y.test", "gogo@mail.build", box)).toThrow(SenderValidationError);
+		// a hyphen sub-mailbox is a genuinely different mailbox, not a tag
+		expect(() => validateSender("x@y.test", "artin-ci@mail.build", box)).toThrow(SenderValidationError);
+	});
+
+	it("still REJECTS the same local-part on another domain", () => {
+		expect(() => validateSender("x@y.test", "artin@evil.example", box)).toThrow(SenderValidationError);
 	});
 });

@@ -34,3 +34,24 @@ export function sameMailbox(a: string, b: string): boolean {
 	if (!a || !b) return false;
 	return deliveryMailbox(a.trim().toLowerCase()) === deliveryMailbox(b.trim().toLowerCase());
 }
+
+/**
+ * Which of a message's recipient addresses is *this* mailbox — preserving any
+ * `+tag`. Used to reply AS the alias the sender wrote to, instead of exposing the
+ * base address (artin's call; the Proton behaviour: "reply from the alias, keep
+ * the real address hidden"). Falls back to the bare mailbox when the message
+ * carries no address belonging to it (e.g. delivered via Bcc).
+ *
+ * `recipients` is the stored comma-separated list; pass To and Cc together.
+ */
+export function receivedAtAddress(recipients: string | null | undefined, mailbox: string): string {
+	if (!recipients) return mailbox;
+	for (const raw of recipients.split(",")) {
+		const addr = raw.trim();
+		// tolerate `Name <a@b>` display form
+		const angled = addr.match(/<([^>]+)>/);
+		const bare = (angled ? angled[1] : addr).trim().toLowerCase();
+		if (bare && sameMailbox(bare, mailbox)) return bare;
+	}
+	return mailbox;
+}

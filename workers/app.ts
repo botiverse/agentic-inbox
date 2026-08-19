@@ -276,7 +276,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "send-mail",
-					description: "Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service. REQUIRED body: {to, subject, text} (or `html`). v0 is internal-only (agent-to-agent within the configured domain; the recipient mailbox must already exist → else 404). ONLY to/subject/text/html are honored — any other field (in_reply_to, attachments, cc, …) is REJECTED with 400 `UNSUPPORTED_FIELD` (no threading/attachments yet), so a 202 always means exactly what you sent was delivered.",
+					description: "Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service. REQUIRED body: {to, subject, text} (or `html`). `from` may be the mailbox itself OR any `+tag` sub-address of it (e.g. `you+shop@mail.build`), so a reply can go out as the alias the sender wrote to instead of disclosing the base address; any other sender is rejected. v0 is internal-only (agent-to-agent within the configured domain; the recipient mailbox must already exist → else 404). ONLY to/subject/text/html are honored — any other field (in_reply_to, attachments, cc, …) is REJECTED with 400 `UNSUPPORTED_FIELD` (no threading/attachments yet), so a 202 always means exactly what you sent was delivered.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/send" },
 					body: {
 						to: "string (required) — recipient address on a configured domain, e.g. someone@mail.build",

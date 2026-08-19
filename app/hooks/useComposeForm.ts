@@ -16,7 +16,7 @@ import {
 import { useDeleteEmail, useForwardEmail, useReplyToEmail, useSaveDraft, useSendEmail } from "~/queries/emails";
 import { useMailbox } from "~/queries/mailboxes";
 import { useUIStore } from "~/hooks/useUIStore";
-import { sameMailbox } from "shared/addresses";
+import { sameMailbox, receivedAtAddress } from "shared/addresses";
 
 function appendUniqueAddress(
 	addresses: string[],
@@ -243,7 +243,15 @@ export function useComposeForm(mailboxId?: string, _folder?: string) {
 		if (toRecipients.length === 0) { setError("Add at least one recipient."); return; }
 		const ccRecipients = splitEmailList(cc); const bccRecipients = splitEmailList(bcc);
 		const fromName = currentMailbox.settings?.fromName || currentMailbox.name;
-		const from = fromName && fromName !== currentMailbox.email ? { email: currentMailbox.email, name: fromName } : currentMailbox.email;
+		// Reply/forward AS the address the sender actually wrote to, preserving any
+		// `+tag`, so the alias stays the identity they know and the base address is
+		// not disclosed (artin's call — the Proton behaviour). A plain compose, or a
+		// message that carries no address of ours (Bcc), falls back to the mailbox.
+		const original = composeOptions.originalEmail;
+		const sendAs = original
+			? receivedAtAddress([original.to, original.cc].filter(Boolean).join(", "), currentMailbox.email)
+			: currentMailbox.email;
+		const from = fromName && fromName !== sendAs ? { email: sendAs, name: fromName } : sendAs;
 		const emailData = {
 			to: toEmailListValue(toRecipients),
 			cc: toEmailListValue(ccRecipients),

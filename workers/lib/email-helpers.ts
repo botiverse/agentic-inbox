@@ -58,8 +58,12 @@ export function validateSender(
 	const toStr = (Array.isArray(to) ? to.join(", ") : to).toLowerCase();
 	const fromEmail = (typeof from === "string" ? from : from.email).toLowerCase();
 
-	if (fromEmail !== mailboxId.toLowerCase()) {
-		throw new SenderValidationError("From address must match the mailbox email address");
+	// The From may be the mailbox itself OR any `+tag` sub-address of it, so a reply
+	// can go out as the alias the sender wrote to rather than exposing the base
+	// address (artin's call). Still strictly one mailbox: `sameMailbox` ignores the
+	// tag only — a different local-part or domain is still rejected.
+	if (!sameMailbox(fromEmail, mailboxId)) {
+		throw new SenderValidationError("From address must be this mailbox or a +tag sub-address of it");
 	}
 
 	const fromDomain = fromEmail.split("@")[1];
@@ -376,5 +380,6 @@ export function snippetFromFullBody(body: string | null | undefined, maxLen = 30
 
 // `deliveryMailbox` lives in shared/addresses.ts — the Worker and the web UI
 // must agree on mailbox identity, so there is exactly one definition.
-export { deliveryMailbox, sameMailbox } from "../../shared/addresses";
+export { deliveryMailbox, sameMailbox, receivedAtAddress } from "../../shared/addresses";
+import { sameMailbox } from "../../shared/addresses";
 
