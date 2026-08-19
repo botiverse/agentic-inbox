@@ -374,25 +374,7 @@ export function snippetFromFullBody(body: string | null | undefined, maxLen = 30
 	return lastWs > 0 ? slice.slice(0, lastWs) : slice;
 }
 
-/**
- * Resolve the mailbox an address delivers to, stripping any `+tag` sub-address
- * (`artin+staging-smoke@mail.build` → `artin@mail.build`). Plus-addressing lets
- * one mailbox receive on unlimited ad-hoc addresses; the tag is for the
- * recipient's own filtering, not a separate mailbox (AX: artin).
- *
- * Only the mailbox LOOKUP is normalized — the full original recipient is still
- * stored on the message, so the tag survives and stays filterable.
- *
- * Left unchanged when there is no `+`, when `+` is the first character (which
- * would leave an empty local-part), or when the input has no local-part/`@` —
- * those then fall through to the normal "no such mailbox" path rather than
- * silently resolving somewhere unintended.
- */
-export function deliveryMailbox(address: string): string {
-	const at = address.lastIndexOf("@");
-	if (at < 1) return address;
-	const local = address.slice(0, at);
-	const plus = local.indexOf("+");
-	if (plus < 1) return address;
-	return `${local.slice(0, plus)}@${address.slice(at + 1)}`;
-}
+// `deliveryMailbox` lives in shared/addresses.ts — the Worker and the web UI
+// must agree on mailbox identity, so there is exactly one definition.
+export { deliveryMailbox, sameMailbox } from "../../shared/addresses";
+

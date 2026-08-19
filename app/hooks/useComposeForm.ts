@@ -16,6 +16,7 @@ import {
 import { useDeleteEmail, useForwardEmail, useReplyToEmail, useSaveDraft, useSendEmail } from "~/queries/emails";
 import { useMailbox } from "~/queries/mailboxes";
 import { useUIStore } from "~/hooks/useUIStore";
+import { sameMailbox } from "shared/addresses";
 
 function appendUniqueAddress(
 	addresses: string[],
@@ -27,7 +28,11 @@ function appendUniqueAddress(
 	if (!trimmed) return;
 
 	const normalized = trimmed.toLowerCase();
-	if (normalized === exclude || seen.has(normalized)) return;
+	// Compare by MAILBOX, not by literal string: mail addressed to a `+tag`
+	// sub-address of your own mailbox (`me+shop@x` vs `me@x`) is still you, and a
+	// plain !== check would put your own address in the reply-all recipients
+	// (only reachable once plus-addressed mail started being delivered).
+	if ((exclude && sameMailbox(normalized, exclude)) || seen.has(normalized)) return;
 
 	seen.add(normalized);
 	addresses.push(trimmed);
@@ -86,7 +91,7 @@ function buildReplyAllFields(
 	for (const recipient of splitEmailList(original.cc)) {
 		const normalized = recipient.toLowerCase();
 		if (
-			normalized === selfAddress ||
+			(selfAddress && sameMailbox(normalized, selfAddress)) ||
 			toSeen.has(normalized) ||
 			ccSeen.has(normalized)
 		) {
