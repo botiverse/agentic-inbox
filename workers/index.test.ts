@@ -189,3 +189,65 @@ describe("inbound path sends ZERO mail (backscatter guard — infra review: Gogo
 		expect(sent).toHaveLength(0);
 	});
 });
+
+// --- Internal send: plus-addressed recipients must resolve to the base mailbox --
+// Found by a pre-deploy BASELINE probe: sending to `postel+baseline@mail.build`
+// returned 404 "Recipient mailbox does not exist". The inbound SMTP fix did not
+// cover this path, and internal send is the ONLY send v0 supports — so `+` would
+// have looked broken exactly where agents use it most.
+
+describe("internal send resolves a +tag recipient to its base mailbox", () => {
+	async function sendTo(to: string, existing: string[]) {
+		const heads: string[] = [];
+		const doNames: string[] = [];
+		const stored: Array<{ recipient?: string }> = [];
+		const env = {
+			DOMAINS: "mail.build",
+			EMAIL_ADDRESSES: [],
+			BUCKET: {
+				head: async (key: string) => {
+					heads.push(key);
+					return existing.some((e) => key === `mailboxes/${e}.json`) ? {} : null;
+				},
+				// requireMailbox GETs the sender's mailbox to read its owner
+				get: async (key: string) =>
+					existing.some((e) => key === `mailboxes/${e}.json`)
+						? { json: async () => ({ owner: "test" }) }
+						: null,
+			},
+			MAILBOX: {
+				idFromName: (n: string) => { doNames.push(n); return n; },
+				get: () => ({
+					createEmail: async (_f: string, row: { recipient?: string }) => { stored.push(row); },
+					checkSendRateLimit: async () => null,
+				}),
+			},
+		} as never;
+		const res = await app.request(
+			`/api/v1/mailboxes/postel@mail.build/send`,
+			{
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ to, subject: "s", text: "t" }),
+			},
+			env,
+		);
+		return { res, heads, doNames, stored };
+	}
+
+	it("accepts a +tag recipient whose BASE mailbox exists (was a 404)", async () => {
+		const { res, heads, doNames, stored } = await sendTo("postel+baseline@mail.build", ["postel@mail.build"]);
+		expect(res.status).toBe(202);
+		expect(heads).toContain("mailboxes/postel@mail.build.json"); // existence checked on the base
+		expect(doNames).toContain("postel@mail.build"); // delivered to the base mailbox
+		// the tag is preserved on the stored message so it stays filterable
+		expect(stored[0].recipient).toBe("postel+baseline@mail.build");
+	});
+
+	it("still 404s when the BASE mailbox does not exist", async () => {
+		const { res } = await sendTo("ghost+tag@mail.build", ["postel@mail.build"]);
+		expect(res.status).toBe(404);
+		const body = await res.json() as { error: string };
+		expect(body.error).toContain("ghost@mail.build"); // names the base, not the tag
+	});
+});

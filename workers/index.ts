@@ -461,9 +461,15 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	if (!isAddressAllowed(to, (c.env.EMAIL_ADDRESSES ?? []) as string[], parseDomains(c.env.DOMAINS))) {
 		return c.json({ error: "v0 send is internal-only: the recipient must be a mailbox on a configured domain (e.g. @mail.build)", code: "SEND_EXTERNAL_UNSUPPORTED" }, 400);
 	}
+	// Plus-addressing applies to INTERNAL delivery too: `someone+tag@` must land in
+	// `someone@`. Without this, agent-to-agent sends (the only send v0 supports)
+	// would 404 on any tagged recipient even though inbound SMTP delivers it — the
+	// feature would look broken on its most-used path. `to` keeps the tag below, so
+	// the recipient can still filter on it.
+	const toMailbox = deliveryMailbox(to);
 	// Recipient mailbox must already exist (internal delivery has no MX fallback).
-	if (!(await c.env.BUCKET.head(`mailboxes/${to}.json`))) {
-		return c.json({ error: "Recipient mailbox does not exist", code: "NOT_FOUND" }, 404);
+	if (!(await c.env.BUCKET.head(`mailboxes/${toMailbox}.json`))) {
+		return c.json({ error: `Recipient mailbox does not exist: ${toMailbox}`, code: "NOT_FOUND" }, 404);
 	}
 	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit();
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
@@ -485,7 +491,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 		]),
 	};
 	// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
-	const toStub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(to));
+	const toStub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(toMailbox));
 	await toStub.createEmail(Folders.INBOX, { id: messageId, ...common }, []);
 	await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
 
