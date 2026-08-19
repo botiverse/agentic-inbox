@@ -530,7 +530,14 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			subject,
 			html: reqBody.html ? content : undefined,
 			text: reqBody.html ? undefined : content,
-			headers: { "Message-ID": `<${outgoingMessageId}>` },
+			// No custom Message-ID: Cloudflare Email Sending rejects it outright
+			// ("only whitelisted headers and X-* headers are accepted") and assigns
+			// its own. Found on the very first real outbound send — which is exactly
+			// why that send was made to one controlled recipient rather than after
+			// opening the allow-list to everyone.
+			// Consequence to remember: for EXTERNAL mail our stored message_id is
+			// ours, not the one the recipient sees, so replies cannot be threaded by
+			// it. Internal delivery is unaffected.
 		});
 	} catch (e) {
 		const msg = (e as Error).message || "unknown error";
