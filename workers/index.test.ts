@@ -74,7 +74,12 @@ function envWithMailboxes(existing: string[]) {
 	const heads: string[] = [];
 	const doNames: string[] = [];
 	const stored: Array<{ recipient?: string }> = [];
+	const sent: unknown[] = [];
 	const env = {
+		// Production's `env.EMAIL` binding is UNRESTRICTED (it can mail any address —
+		// it has to, for replies/forwards). So nothing at the platform layer stops a
+		// send from the INBOUND path; only this spy does. (infra review: Gogo.)
+		EMAIL: { send: async (m: unknown) => { sent.push(m); } },
 		DOMAINS: "mail.build",
 		EMAIL_ADDRESSES: [],
 		BUCKET: {
@@ -94,16 +99,16 @@ function envWithMailboxes(existing: string[]) {
 		},
 		EMAIL_AGENT: { idFromName: (n: string) => n, get: () => ({ fetch: async () => new Response("") }) },
 	} as never;
-	return { heads, doNames, stored, env };
+	return { heads, doNames, stored, sent, env };
 }
 
 async function deliver(to: string, existing: string[]) {
 	const { stream, size } = rawEmail(to);
 	const rejects: string[] = [];
-	const { heads, doNames, stored, env } = envWithMailboxes(existing);
+	const { heads, doNames, stored, sent, env } = envWithMailboxes(existing);
 	const event = { raw: stream, rawSize: size, setReject: (r: string) => rejects.push(r) };
 	await receiveEmail(event, env, { waitUntil() {} } as never);
-	return { rejects, heads, doNames, stored };
+	return { rejects, heads, doNames, stored, sent };
 }
 
 describe("inbound: plus-addressing delivers to the base mailbox (AX: artin)", () => {
@@ -149,10 +154,38 @@ describe("inbound: unknown recipient is REJECTED in-session, never silently drop
 	});
 
 	it("never generates a bounce email — rejection is in-session only (no backscatter)", async () => {
-		// A send path would need BUCKET.put / an email binding; the reject path must
-		// touch neither. env here has no send capability at all, so any attempt to
-		// mail a bounce would throw rather than pass.
-		const { rejects } = await deliver("nobody@mail.build", []);
+		const { rejects, sent } = await deliver("nobody@mail.build", []);
 		expect(rejects).toHaveLength(1);
+		expect(sent).toHaveLength(0);
+	});
+});
+
+describe("inbound path sends ZERO mail (backscatter guard — infra review: Gogo)", () => {
+	// This is the structural teeth behind "the receive path never sends". The
+	// platform gives us nothing here: `env.EMAIL` is unrestricted and MUST stay
+	// that way (replies/forwards need to reach any address), so an allow-list
+	// cannot be the control point. Without this test the property survives only as
+	// long as every future editor reads the backscatter reasoning in the comments.
+	// If someone adds a send to the receive path, these go red immediately.
+	it("sends nothing when delivering a normal message", async () => {
+		const { sent } = await deliver("artin@mail.build", ["artin@mail.build"]);
+		expect(sent).toHaveLength(0);
+	});
+
+	it("sends nothing when delivering to a +tag address", async () => {
+		const { sent } = await deliver("artin+promo@mail.build", ["artin@mail.build"]);
+		expect(sent).toHaveLength(0);
+	});
+
+	it("sends nothing when REJECTING an unknown mailbox (the backscatter case)", async () => {
+		// The dangerous one: spam forges the From, so mailing a "bounce" here would
+		// hit an innocent third party and get mail.build blacklisted.
+		const { sent } = await deliver("nobody@mail.build", ["artin@mail.build"]);
+		expect(sent).toHaveLength(0);
+	});
+
+	it("sends nothing when REJECTING an off-domain recipient", async () => {
+		const { sent } = await deliver("someone@elsewhere.example", ["artin@mail.build"]);
+		expect(sent).toHaveLength(0);
 	});
 });
