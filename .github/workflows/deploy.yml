@@ -14,6 +14,13 @@
 # Email Routing, or Access.
 name: deploy
 
+# MANUAL ONLY, by artin's call: a deploy is an explicit decision, not a
+# side effect of pushing. `ref` lets you deploy any branch/tag/SHA, so work can
+# continue on a feature branch while you choose exactly what goes to production.
+#
+# NOTE: GitHub only offers workflow_dispatch for workflows present on the DEFAULT
+# branch, so this file has to reach `main` before the button exists — even though
+# the ref you deploy can be any branch.
 on:
   workflow_dispatch:
     inputs:
@@ -21,8 +28,6 @@ on:
         description: "Git ref (branch, tag or SHA) to deploy"
         required: false
         default: ""
-  push:
-    branches: [main, feat/raft-oauth-session]
 
 concurrency:
   # Never let two deploys race; a queued one supersedes, but the in-flight one is
