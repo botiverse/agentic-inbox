@@ -18,7 +18,7 @@
 		// outbound rollout (artin 2026-08-19): we had never sent externally, so
 		// deliverability was unmeasured. Widen once a real Authentication-Results
 		// confirms SPF/DKIM alignment.
-		"EXTERNAL_SEND_DOMAINS": "gmail.com,botiverse.dev,cat.ms,oranix.io",
+		"EXTERNAL_SEND_DOMAINS": "gmail.com,botiverse.dev,cat.ms,oranix.io,mercury.com",
 		// Per-agent auth (task #1). PRO_SERVER_IDS = comma-separated raft server_ids
 		// on the pro tier (pro=10 mailboxes/agent, free=1). RAFT_OAUTH_* = Login with
 		// Raft Connected App; CLIENT_SECRET is set via `wrangler secret`, not here.
