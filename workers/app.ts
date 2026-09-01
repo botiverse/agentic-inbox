@@ -383,7 +383,9 @@ app.all("/auth/raft/callback", async (c) => {
 	} catch (err) {
 		const status = err instanceof RaftAuthError ? err.status : 403;
 		if (err instanceof RaftAuthError) console.warn("[raft-auth]", err.code, err.reason);
-		const message = (err as Error).message || GENERIC_LOGIN_FAILURE;
+		// Keep untyped downstream details out of an unauthenticated response:
+		// provider/binding messages may contain internal URLs, config, or secrets.
+		const message = err instanceof RaftAuthError ? err.message : GENERIC_LOGIN_FAILURE;
 		const errorCode = err instanceof RaftAuthError ? err.code : "LOGIN_FAILED";
 		const suggestedNextAction = err instanceof RaftAuthError ? err.suggestedNextAction : undefined;
 		return c.json(

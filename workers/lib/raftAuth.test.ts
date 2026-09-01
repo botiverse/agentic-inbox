@@ -13,6 +13,7 @@ import {
 	ownerFromPrincipal,
 	raftSetupUrl,
 	isBrowserCallbackFlow,
+	GENERIC_LOGIN_FAILURE,
 } from "./raftAuth";
 
 const config: RaftOAuthConfig = {
@@ -172,5 +173,27 @@ describe("isBrowserCallbackFlow", () => {
 	it("identifies agent flow when expectedState cookie is absent, even if presentedState exists", () => {
 		// Legacy CLI sends `state` in the callback URL without a cookie. Must route to agent flow.
 		expect(isBrowserCallbackFlow(null)).toBe(false);
+	});
+});
+
+describe("public callback error boundary", () => {
+	it("does not reflect an unexpected provider error", () => {
+		const error = new Error("secret-like internal detail https://internal.example.test");
+		const publicBody = {
+			error: error instanceof RaftAuthError ? error.message : GENERIC_LOGIN_FAILURE,
+			errorCode: error instanceof RaftAuthError ? error.code : "LOGIN_FAILED",
+		};
+		expect(publicBody).toEqual({ error: GENERIC_LOGIN_FAILURE, errorCode: "LOGIN_FAILED" });
+		expect(JSON.stringify(publicBody)).not.toContain("internal.example.test");
+	});
+	it("preserves actionable typed fields", () => {
+		const error = new RaftAuthError("RAFT_SERVER_NOT_ALLOWED", "server_not_allowed", 403, "safe reason", "ask an admin");
+		const publicBody = {
+			error: error.message,
+			errorCode: error.code,
+			reason: error.reason,
+			suggestedNextAction: error.suggestedNextAction,
+		};
+		expect(publicBody).toEqual({ error: "safe reason", errorCode: "RAFT_SERVER_NOT_ALLOWED", reason: "server_not_allowed", suggestedNextAction: "ask an admin" });
 	});
 });
