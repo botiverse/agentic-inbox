@@ -12,6 +12,7 @@ import {
 	validateRaftPrincipal,
 	ownerFromPrincipal,
 	raftSetupUrl,
+	isBrowserCallbackFlow,
 } from "./raftAuth";
 
 const config: RaftOAuthConfig = {
@@ -161,5 +162,15 @@ describe("raftSetupUrl", () => {
 		expect(url.searchParams.get("client_id")).toBe("agentic-inbox");
 		expect(url.searchParams.get("return_to")).toBe("https://mail.build/auth/raft/callback");
 		expect(url.searchParams.get("state")).toBe("the-state");
+	});
+});
+
+describe("isBrowserCallbackFlow", () => {
+	it("identifies browser flow when expectedState cookie is present", () => {
+		expect(isBrowserCallbackFlow("some-login-state-cookie")).toBe(true);
+	});
+	it("identifies agent flow when expectedState cookie is absent, even if presentedState exists", () => {
+		// Legacy CLI sends `state` in the callback URL without a cookie. Must route to agent flow.
+		expect(isBrowserCallbackFlow(null)).toBe(false);
 	});
 });
