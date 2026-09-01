@@ -254,7 +254,7 @@ export function createAllowedByPrefix(
 	return !reservedByOtherAccount;
 }
 
-import type { FlagshipBinding } from "@cloudflare/flagship";
+import type { FlagshipBinding } from "../types";
 
 /**
  * Whether a raft server_id is allowed to sign in.

@@ -20,7 +20,7 @@
  */
 
 import type { RaftPrincipal } from "./session";
-import type { FlagshipBinding } from "@cloudflare/flagship";
+import type { FlagshipBinding } from "../types";
 import { serverAllowed, isServerAllowed } from "./auth";
 
 export type AuthFailure =
