@@ -269,8 +269,15 @@ export async function isServerAllowed(
 	if (!serverId) return false;
 	if (flags) {
 		try {
-			const flagVal = await flags.getBooleanValue("server-allowed", false, { serverId });
-			if (flagVal) return true;
+			if (typeof flags.getBooleanDetails === "function") {
+				const details = await flags.getBooleanDetails("server-allowed", false, { serverId });
+				if (details.reason === "TARGETING_MATCH" || details.reason === "SPLIT") {
+					return details.value;
+				}
+			} else {
+				const flagVal = await flags.getBooleanValue("server-allowed", false, { serverId });
+				if (flagVal) return true;
+			}
 		} catch (err) {
 			console.warn("[flagship] error evaluating server-allowed flag:", err);
 		}
@@ -280,6 +287,7 @@ export async function isServerAllowed(
 
 /**
  * Derive plan for owner with Cloudflare Flagship dynamic flag "pro-tier-server" evaluation.
+ * Explicit TARGETING_MATCH overrides static tiering; default/disabled falls back to static list.
  */
 export async function getPlanForOwner(
 	owner: string,
@@ -289,8 +297,15 @@ export async function getPlanForOwner(
 	const sid = serverIdFromOwner(owner);
 	if (flags && sid) {
 		try {
-			const isPro = await flags.getBooleanValue("pro-tier-server", false, { serverId: sid });
-			if (isPro) return "pro";
+			if (typeof flags.getBooleanDetails === "function") {
+				const details = await flags.getBooleanDetails("pro-tier-server", false, { serverId: sid });
+				if (details.reason === "TARGETING_MATCH" || details.reason === "SPLIT") {
+					return details.value ? "pro" : "free";
+				}
+			} else {
+				const isPro = await flags.getBooleanValue("pro-tier-server", false, { serverId: sid });
+				if (isPro) return "pro";
+			}
 		} catch (err) {
 			console.warn("[flagship] error evaluating pro-tier-server flag:", err);
 		}

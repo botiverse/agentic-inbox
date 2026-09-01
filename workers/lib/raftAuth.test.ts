@@ -59,16 +59,44 @@ describe("validateRaftPrincipal", () => {
 			expect((e as RaftAuthError).suggestedNextAction).toContain("ALLOWED_SERVER_IDS");
 		}
 	});
-	it("accepts a server allowed dynamically via Cloudflare Flagship binding", async () => {
+	it("falls back to static allowlist when Flagship returns reason=DEFAULT", async () => {
+		const mockFlags = {
+			getBooleanDetails: async (key: string, def: boolean) => ({
+				flagKey: key,
+				value: def,
+				reason: "DEFAULT",
+			}),
+		} as any;
+		// Allowed static server passes
+		const p = await validateRaftPrincipal(validUserinfo, config, mockFlags);
+		expect(p.serverId).toBe(validUserinfo.server_id);
+		// Unlisted server rejected
+		const bad = { ...validUserinfo, server_id: "unlisted-server" };
+		await expect(validateRaftPrincipal(bad, config, mockFlags)).rejects.toThrowError(RaftAuthError);
+	});
+	it("dynamically allows unlisted server when Flagship targets with value=true", async () => {
 		const customServer = { ...validUserinfo, server_id: "custom-server-uuid" };
 		const mockFlags = {
-			getBooleanValue: async (key: string, def: boolean, ctx?: Record<string, any>) => {
-				if (key === "server-allowed" && ctx?.serverId === "custom-server-uuid") return true;
-				return def;
+			getBooleanDetails: async (key: string, def: boolean, ctx?: Record<string, any>) => {
+				if (key === "server-allowed" && ctx?.serverId === "custom-server-uuid") {
+					return { flagKey: key, value: true, reason: "TARGETING_MATCH" };
+				}
+				return { flagKey: key, value: def, reason: "DEFAULT" };
 			},
 		} as any;
 		const p = await validateRaftPrincipal(customServer, config, mockFlags);
 		expect(p.serverId).toBe("custom-server-uuid");
+	});
+	it("dynamically revokes static server when Flagship targets with value=false (override)", async () => {
+		const mockFlags = {
+			getBooleanDetails: async (key: string, def: boolean, ctx?: Record<string, any>) => {
+				if (key === "server-allowed" && ctx?.serverId === validUserinfo.server_id) {
+					return { flagKey: key, value: false, reason: "TARGETING_MATCH" };
+				}
+				return { flagKey: key, value: def, reason: "DEFAULT" };
+			},
+		} as any;
+		await expect(validateRaftPrincipal(validUserinfo, config, mockFlags)).rejects.toThrowError(RaftAuthError);
 	});
 	it("rejects a token minted for a different client (client_not_allowed)", async () => {
 		const bad = { ...validUserinfo, client_id: "some-other-app" };
