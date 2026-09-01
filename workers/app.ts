@@ -227,7 +227,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 			app_origin: origin,
 			docs_url: "https://docs.raft.build/developers/login-with-raft/",
 			execution: { mode: "http_api", base_url: origin },
-			auth: { type: "login_with_raft", login_url: `${origin}/auth/raft/login` },
+			auth: { type: "login_with_raft", login_url: `${origin}/auth/raft/login?flow=agent` },
 			// A cheap authenticated call that returns the caller's own mailboxes = context.
 			context_check: { url: `${origin}/api/v1/mailboxes`, method: "GET" },
 			actions: [
@@ -316,6 +316,13 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 // the agent_request grant with state forbidden. Both seal a session cookie that the
 // middleware maps to authOwner/authScope/authHandle.
 app.get("/auth/raft/login", async (c) => {
+	const url = new URL(c.req.url);
+	// Agent CLI pre-fetch: do not set a CSRF state cookie in the CLI jar.
+	if (url.searchParams.get("flow") === "agent") {
+		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw));
+		c.header("Cache-Control", "no-store");
+		return c.body(null, 204);
+	}
 	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
 	const config = readRaftConfig(c.env);
 	const state = newLoginState();
