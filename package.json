@@ -89,7 +89,7 @@
 		"@tiptap/extension-text": "3.20.2"
 	},
 	"devDependencies": {
-		"@cloudflare/vite-plugin": "^1.0.12",
+		"@cloudflare/vite-plugin": "^1.54.3",
 		"@cloudflare/workers-types": "^5.20260901.1",
 		"@react-router/dev": "^7.5.3",
 		"@tailwindcss/vite": "^4.1.4",
