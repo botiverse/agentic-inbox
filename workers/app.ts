@@ -25,6 +25,7 @@ import {
 import {
 	type RaftOAuthConfig,
 	RaftAuthError,
+	authFailureGuidance,
 	exchangeAuthorizationCode,
 	exchangeAgentRequest,
 	fetchUserinfo,
@@ -381,8 +382,16 @@ app.all("/auth/raft/callback", async (c) => {
 		return c.body(null, 204);
 	} catch (err) {
 		const status = err instanceof RaftAuthError ? err.status : 403;
-		if (err instanceof RaftAuthError) console.warn("[raft-auth]", err.code, err.reason);
-		return c.json({ error: "Login could not be completed." }, status as 400 | 403 | 500, { "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" });
+		if (err instanceof RaftAuthError) {
+			console.warn("[raft-auth]", err.code, err.reason);
+			const guidance = authFailureGuidance(err.reason);
+			return c.json({
+				error: guidance.error,
+				errorCode: err.code,
+				suggestedNextAction: guidance.suggestedNextAction,
+			}, status as 400 | 403 | 500, { "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" });
+		}
+		return c.json({ error: "Login could not be completed.", errorCode: "RAFT_LOGIN_FAILED", suggestedNextAction: "Retry once; if it persists, contact the mail.build owner with the error code." }, status as 400 | 403 | 500, { "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" });
 	}
 });
 

@@ -35,6 +35,34 @@ export type AuthFailure =
 
 const GENERIC_LOGIN_FAILURE = "Login could not be completed. Please try again or contact the workspace owner.";
 
+export function authFailureGuidance(reason: AuthFailure): { error: string; suggestedNextAction: string } {
+	switch (reason) {
+		case "server_not_allowed":
+			return {
+				error: "This Raft Server is not authorized for mail.build.",
+				suggestedNextAction: "Ask the mail.build owner to add this Server ID to ALLOWED_SERVER_IDS, then run `raft integration login --service agentic-inbox` again.",
+			};
+		case "client_not_allowed":
+			return {
+				error: "The login token was issued for a different application.",
+				suggestedNextAction: "Use the mail.build Agent Login service and contact its owner if the application binding is wrong.",
+			};
+		case "missing_code":
+			return { error: "The login callback is missing its authorization code.", suggestedNextAction: "Restart the Agent Login flow; do not reuse this callback URL." };
+		case "token_exchange_failed":
+			return { error: "Raft did not accept the login exchange.", suggestedNextAction: "Retry once; if it persists, ask the mail.build owner to inspect the app grant." };
+		case "userinfo_failed":
+			return { error: "Raft login succeeded, but identity lookup failed.", suggestedNextAction: "Retry once; if it persists, ask the Raft service owner to inspect the token." };
+		case "principal_type_invalid":
+			return { error: "Raft returned an unsupported principal type.", suggestedNextAction: "Ask the mail.build owner to inspect the Agent Login identity binding." };
+		case "token_response_malformed":
+		case "userinfo_malformed":
+		case "wrong_principal_type":
+		default:
+			return { error: GENERIC_LOGIN_FAILURE, suggestedNextAction: "Retry once; if it persists, contact the mail.build owner with the error code." };
+	}
+}
+
 export class RaftAuthError extends Error {
 	constructor(
 		public readonly code: string,

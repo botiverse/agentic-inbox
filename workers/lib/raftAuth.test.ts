@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
 	type RaftOAuthConfig,
 	RaftAuthError,
+	authFailureGuidance,
 	exchangeAuthorizationCode,
 	exchangeAgentRequest,
 	fetchUserinfo,
@@ -41,6 +42,20 @@ function mockFetch(captured: { req?: Request; bodyText?: string }, body: unknown
 		return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 	}) as typeof fetch;
 }
+
+describe("auth failure guidance", () => {
+	it("gives a typed allowlist error and owner action", () => {
+		const guidance = authFailureGuidance("server_not_allowed");
+		expect(guidance.error).toContain("not authorized");
+		expect(guidance.suggestedNextAction).toContain("ALLOWED_SERVER_IDS");
+		expect(guidance.suggestedNextAction).toContain("raft integration login");
+	});
+	it("gives a recovery action for malformed callbacks", () => {
+		const guidance = authFailureGuidance("missing_code");
+		expect(guidance.error).toContain("missing");
+		expect(guidance.suggestedNextAction).toContain("Restart");
+	});
+});
 
 describe("validateRaftPrincipal", () => {
 	it("accepts valid botiverse userinfo and trusts only immutable claims", () => {
