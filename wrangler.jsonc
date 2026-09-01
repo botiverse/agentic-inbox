@@ -1,5 +1,9 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
+	"flagship": {
+		"binding": "FLAGS",
+		"app_id": "agentic-inbox"
+	},
 	"name": "agentic-inbox",
 	"compatibility_date": "2025-11-28",
 	"main": "./workers/app.ts",
