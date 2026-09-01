@@ -31,6 +31,7 @@ import {
 	validateRaftPrincipal,
 	ownerFromPrincipal,
 	raftSetupUrl,
+	isBrowserCallbackFlow,
 } from "./lib/raftAuth";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8h
@@ -340,8 +341,9 @@ app.all("/auth/raft/callback", async (c) => {
 	const code = url.searchParams.get("code") ?? "";
 	const presentedState = url.searchParams.get("state");
 	const expectedState = readLoginState(c.req.raw);
-	// Browser flow iff a state is present on either side; agent flow otherwise.
-	const browserFlow = presentedState !== null || expectedState !== null;
+	// Browser flow requires an active login-state cookie from /auth/raft/login; agent flow otherwise.
+	// Tolerates agent handoff requests that include an extraneous `state` query param without a cookie.
+	const browserFlow = isBrowserCallbackFlow(expectedState);
 	try {
 		let token;
 		if (browserFlow) {

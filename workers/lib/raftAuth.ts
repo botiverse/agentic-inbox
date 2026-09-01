@@ -171,3 +171,12 @@ export function raftSetupUrl(config: RaftOAuthConfig, callbackUrl: string, state
 	url.searchParams.set("state", state);
 	return url.toString();
 }
+
+/**
+ * Discriminate between browser (human authorization_code) and agent (CLI agent_request) callback flows.
+ * Browser flow requires an active login-state cookie from /auth/raft/login (expectedState !== null).
+ * Agent flow has no login-state cookie, and tolerates legacy CLI requests that include an extraneous `state` query param.
+ */
+export function isBrowserCallbackFlow(expectedState: string | null): boolean {
+	return expectedState !== null;
+}
