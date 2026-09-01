@@ -1,5 +1,14 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
+	"unsafe": {
+		"bindings": [
+			{
+				"name": "FLAGS",
+				"type": "flagship",
+				"app_id": "bed7b400-7c9a-48de-b47a-99e9e31b7d84"
+			}
+		]
+	},
 	"flagship": [
 		{
 			"binding": "FLAGS",
