@@ -223,3 +223,31 @@ describe("isBrowserCallbackFlow", () => {
 		expect(isBrowserCallbackFlow(null)).toBe(false);
 	});
 });
+
+describe("RaftAuthError diagnostics & structured error properties", () => {
+	it("carries structured code, reason, status, and suggestedNextAction", () => {
+		const err = new RaftAuthError(
+			"RAFT_SERVER_NOT_ALLOWED",
+			"server_not_allowed",
+			403,
+			"Server custom-123 is not allowed.",
+			"Ask a workspace admin to add server ID custom-123.",
+		);
+		expect(err.code).toBe("RAFT_SERVER_NOT_ALLOWED");
+		expect(err.reason).toBe("server_not_allowed");
+		expect(err.status).toBe(403);
+		expect(err.message).toBe("Server custom-123 is not allowed.");
+		expect(err.suggestedNextAction).toBe("Ask a workspace admin to add server ID custom-123.");
+	});
+
+	it("missing code returns status 400 with actionable next action", async () => {
+		try {
+			await exchangeAgentRequest(config, "");
+			expect.fail("should throw");
+		} catch (e) {
+			expect((e as RaftAuthError).status).toBe(400);
+			expect((e as RaftAuthError).code).toBe("RAFT_MISSING_CODE");
+			expect((e as RaftAuthError).suggestedNextAction).toBeDefined();
+		}
+	});
+});
