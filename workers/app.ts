@@ -382,18 +382,26 @@ app.all("/auth/raft/callback", async (c) => {
 		return c.body(null, 204);
 	} catch (err) {
 		const status = err instanceof RaftAuthError ? err.status : 403;
-		if (err instanceof RaftAuthError) console.warn("[raft-auth]", err.code, err.reason);
-		const message = (err as Error).message || GENERIC_LOGIN_FAILURE;
-		const errorCode = err instanceof RaftAuthError ? err.code : "LOGIN_FAILED";
-		const suggestedNextAction = err instanceof RaftAuthError ? err.suggestedNextAction : undefined;
+		if (err instanceof RaftAuthError) {
+			console.warn("[raft-auth]", err.code, err.reason);
+			return c.json(
+				{
+					error: err.message,
+					errorCode: err.code,
+					reason: err.reason,
+					suggestedNextAction: err.suggestedNextAction,
+				},
+				status as 400 | 403 | 500,
+				{ "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" },
+			);
+		}
+		console.error("Login-with-Raft unexpected callback failure:", (err as Error).message, (err as Error).stack);
 		return c.json(
 			{
-				error: message,
-				errorCode,
-				reason: err instanceof RaftAuthError ? err.reason : undefined,
-				suggestedNextAction,
+				error: GENERIC_LOGIN_FAILURE,
+				errorCode: "LOGIN_FAILED",
 			},
-			status as 400 | 403 | 500,
+			500,
 			{ "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" },
 		);
 	}
