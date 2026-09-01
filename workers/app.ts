@@ -365,7 +365,7 @@ app.all("/auth/raft/callback", async (c) => {
 			token = await exchangeAgentRequest(config, code);
 		}
 		const userinfo = await fetchUserinfo(config, token.access_token);
-		const principal = validateRaftPrincipal(userinfo, config);
+		const principal = await validateRaftPrincipal(userinfo, config, c.env.FLAGS);
 		const ttl = Math.max(1, Math.min(typeof token.expires_in === "number" ? token.expires_in : SESSION_TTL_SECONDS, SESSION_TTL_SECONDS));
 		const sealed = await sealSession({ principal, expiresAt: Date.now() + ttl * 1000 }, c.env.RAFT_SESSION_SECRET as string);
 		// Two Set-Cookie headers (session + clear login-state) MUST both survive —

@@ -20,7 +20,8 @@
  */
 
 import type { RaftPrincipal } from "./session";
-import { serverAllowed } from "./auth";
+import type { FlagshipBinding } from "@cloudflare/flagship";
+import { serverAllowed, isServerAllowed } from "./auth";
 
 export type AuthFailure =
 	| "missing_code"
@@ -175,7 +176,7 @@ export async function fetchUserinfo(config: RaftOAuthConfig, accessToken: string
  * anti-squat treats it as v0 handle; hardening anchors to sub as a fast-follow).
  * Enforces the botiverse-only server allow-list + client_id match here.
  */
-export function validateRaftPrincipal(userinfo: unknown, config: RaftOAuthConfig): RaftPrincipal {
+export async function validateRaftPrincipal(userinfo: unknown, config: RaftOAuthConfig, flags?: FlagshipBinding): Promise<RaftPrincipal> {
 	if (!isRecord(userinfo)) throw new RaftAuthError("RAFT_USERINFO_MALFORMED", "userinfo_malformed");
 	const sub = str(userinfo, "sub");
 	const type = str(userinfo, "type");
@@ -201,13 +202,14 @@ export function validateRaftPrincipal(userinfo: unknown, config: RaftOAuthConfig
 	// here) — a sealed session is itself proof the server was allowed, so the
 	// per-request middleware trusts the owner and does NOT re-check. Uses the
 	// shared serverAllowed from lib/auth (single source of truth).
-	if (!serverAllowed(serverId, config.allowedServerIds as string[])) {
+	const allowed = await isServerAllowed(serverId, config.allowedServerIds as string[], flags);
+	if (!allowed) {
 		throw new RaftAuthError(
 			"RAFT_SERVER_NOT_ALLOWED",
 			"server_not_allowed",
 			403,
 			`Server \x27${serverId}\x27 is not in the allowed servers list for mail.build.`,
-			`Ask a workspace admin to add server ID \x27${serverId}\x27 to ALLOWED_SERVER_IDS in mail.build configuration.`,
+			`Ask a workspace admin to add server ID \x27${serverId}\x27 to ALLOWED_SERVER_IDS or Cloudflare Flagship configuration.`,
 		);
 	}
 	// The token was issued to OUR app; the presented client_id must match the key we authenticate as.

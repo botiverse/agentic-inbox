@@ -3,6 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { describe, it, expect } from "vitest";
+import type { RaftPrincipal } from "./session";
 import {
 	type RaftOAuthConfig,
 	RaftAuthError,
@@ -43,41 +44,53 @@ function mockFetch(captured: { req?: Request; bodyText?: string }, body: unknown
 }
 
 describe("validateRaftPrincipal", () => {
-	it("accepts valid botiverse userinfo and trusts only immutable claims", () => {
-		const p = validateRaftPrincipal(validUserinfo, config);
+	it("accepts valid botiverse userinfo and trusts only immutable claims", async () => {
+		const p = await validateRaftPrincipal(validUserinfo, config);
 		expect(p.sub).toBe(validUserinfo.sub);
 		expect(p.type).toBe("agent");
 		expect(p.serverId).toBe(validUserinfo.server_id);
 		expect(p.preferredUsername).toBe("Gogo");
 	});
-	it("rejects a non-botiverse server (server_not_allowed)", () => {
+	it("rejects a non-botiverse server (server_not_allowed) when Flagship is absent", async () => {
 		const bad = { ...validUserinfo, server_id: "deadbeef-0000-0000-0000-000000000000" };
-		expect(() => validateRaftPrincipal(bad, config)).toThrowError(RaftAuthError);
-		try { validateRaftPrincipal(bad, config); } catch (e) { expect((e as RaftAuthError).reason).toBe("server_not_allowed"); }
+		await expect(validateRaftPrincipal(bad, config)).rejects.toThrowError(RaftAuthError);
+		try { await validateRaftPrincipal(bad, config); } catch (e) {
+			expect((e as RaftAuthError).reason).toBe("server_not_allowed");
+			expect((e as RaftAuthError).suggestedNextAction).toContain("ALLOWED_SERVER_IDS");
+		}
 	});
-	it("rejects a token minted for a different client (client_not_allowed)", () => {
+	it("accepts a server allowed dynamically via Cloudflare Flagship binding", async () => {
+		const customServer = { ...validUserinfo, server_id: "custom-server-uuid" };
+		const mockFlags = {
+			getBooleanValue: async (key: string, def: boolean, ctx?: Record<string, any>) => {
+				if (key === "server-allowed" && ctx?.serverId === "custom-server-uuid") return true;
+				return def;
+			},
+		} as any;
+		const p = await validateRaftPrincipal(customServer, config, mockFlags);
+		expect(p.serverId).toBe("custom-server-uuid");
+	});
+	it("rejects a token minted for a different client (client_not_allowed)", async () => {
 		const bad = { ...validUserinfo, client_id: "some-other-app" };
-		try { validateRaftPrincipal(bad, config); expect.fail("should throw"); }
+		try { await validateRaftPrincipal(bad, config); expect.fail("should throw"); }
 		catch (e) { expect((e as RaftAuthError).reason).toBe("client_not_allowed"); }
 	});
-	it("rejects missing required claims (userinfo_malformed)", () => {
+	it("rejects missing required claims (userinfo_malformed)", async () => {
 		for (const k of ["sub", "type", "server_id", "client_id"]) {
 			const bad = { ...validUserinfo } as Record<string, unknown>;
 			delete bad[k];
-			try { validateRaftPrincipal(bad, config); expect.fail(`should throw for missing ${k}`); }
+			try { await validateRaftPrincipal(bad, config); expect.fail(`should throw for missing ${k}`); }
 			catch (e) { expect((e as RaftAuthError).reason).toBe("userinfo_malformed"); }
 		}
 	});
-	it("rejects an invalid principal type", () => {
+	it("rejects an invalid principal type", async () => {
 		const bad = { ...validUserinfo, type: "robot" };
-		try { validateRaftPrincipal(bad, config); expect.fail("should throw"); }
+		try { await validateRaftPrincipal(bad, config); expect.fail("should throw"); }
 		catch (e) { expect((e as RaftAuthError).reason).toBe("principal_type_invalid"); }
 	});
-	it("accepts a valid HUMAN principal (browser authorization_code path — never live-run yet)", () => {
-		// Agent principals are exercised everywhere; the human login path has only ever
-		// existed in code, never been walked live. Lock its validation before Artea does.
+	it("accepts a valid HUMAN principal (browser authorization_code path — never live-run yet)", async () => {
 		const human = { ...validUserinfo, type: "human", sub: "human-sub-1111", preferred_username: "artea", name: "Artea" };
-		const p = validateRaftPrincipal(human, config);
+		const p = await validateRaftPrincipal(human, config);
 		expect(p.type).toBe("human");
 		expect(p.sub).toBe("human-sub-1111");
 		expect(p.serverId).toBe(validUserinfo.server_id);
@@ -86,23 +99,31 @@ describe("validateRaftPrincipal", () => {
 });
 
 describe("ownerFromPrincipal", () => {
+	const agentPrincipal: RaftPrincipal = {
+		sub: validUserinfo.sub,
+		type: "agent",
+		serverId: validUserinfo.server_id,
+		clientId: validUserinfo.client_id,
+		preferredUsername: validUserinfo.preferred_username,
+		name: validUserinfo.name,
+	};
+	const humanPrincipal: RaftPrincipal = {
+		sub: "human-sub-1111",
+		type: "human",
+		serverId: validUserinfo.server_id,
+		clientId: validUserinfo.client_id,
+		preferredUsername: "artea",
+		name: "Artea",
+	};
+
 	it("is raft:server:type:sub", () => {
-		const p = validateRaftPrincipal(validUserinfo, config);
-		expect(ownerFromPrincipal(p)).toBe(`raft:${validUserinfo.server_id}:agent:${validUserinfo.sub}`);
+		expect(ownerFromPrincipal(agentPrincipal)).toBe(`raft:${validUserinfo.server_id}:agent:${validUserinfo.sub}`);
 	});
 	it("embeds type=human for a human principal", () => {
-		const p = validateRaftPrincipal({ ...validUserinfo, type: "human", sub: "human-sub-1111" }, config);
-		expect(ownerFromPrincipal(p)).toBe(`raft:${validUserinfo.server_id}:human:human-sub-1111`);
+		expect(ownerFromPrincipal(humanPrincipal)).toBe(`raft:${validUserinfo.server_id}:human:human-sub-1111`);
 	});
 	it("separates human vs agent owners by type — the mailbox-isolation guarantee (even at identical sub/server)", () => {
-		// A person's human and agent identities are DISTINCT owners because `type` is
-		// part of the owner key, so their mailbox sets never overlap. This is the
-		// invariant behind cross-principal isolation (a human session must not see an
-		// agent's mailboxes and vice-versa). Regression guard: if the owner key ever
-		// stopped encoding type, the two would collide and isolation would break.
-		const agent = validateRaftPrincipal({ ...validUserinfo, type: "agent" }, config);
-		const human = validateRaftPrincipal({ ...validUserinfo, type: "human" }, config);
-		expect(ownerFromPrincipal(agent)).not.toBe(ownerFromPrincipal(human));
+		expect(ownerFromPrincipal(agentPrincipal)).not.toBe(ownerFromPrincipal(humanPrincipal));
 	});
 });
 

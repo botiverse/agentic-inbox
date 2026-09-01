@@ -21,7 +21,7 @@ import {
 import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
-import { maxMailboxesForPlan, planForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart } from "./lib/auth";
+import { maxMailboxesForPlan, planForOwner, getPlanForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart } from "./lib/auth";
 import { mintKey, mintToken, recordOwnedMailbox, removeOwnedMailbox, rotateKey, listOwnerKeys, revokeOwnerKey, keyGuidance } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
@@ -241,7 +241,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// two rapid claims can't both slip past the limit (dogfood: Cardy — the old
 	// kv.list count lagged ~60s and let a 3rd mailbox through on free=1). Admin
 	// gets an effectively unlimited allowance but is still recorded.
-	const plan = planForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS));
+	const plan = await getPlanForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS), c.env.FLAGS);
 	const limit = isAdmin ? Number.MAX_SAFE_INTEGER : maxMailboxesForPlan(plan);
 	const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
 	const reservation = await ownerStub.reserve(owner, email, displayName, limit);
