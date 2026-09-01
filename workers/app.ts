@@ -32,6 +32,7 @@ import {
 	ownerFromPrincipal,
 	raftSetupUrl,
 	isBrowserCallbackFlow,
+	GENERIC_LOGIN_FAILURE,
 } from "./lib/raftAuth";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8h
@@ -382,7 +383,19 @@ app.all("/auth/raft/callback", async (c) => {
 	} catch (err) {
 		const status = err instanceof RaftAuthError ? err.status : 403;
 		if (err instanceof RaftAuthError) console.warn("[raft-auth]", err.code, err.reason);
-		return c.json({ error: "Login could not be completed." }, status as 400 | 403 | 500, { "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" });
+		const message = (err as Error).message || GENERIC_LOGIN_FAILURE;
+		const errorCode = err instanceof RaftAuthError ? err.code : "LOGIN_FAILED";
+		const suggestedNextAction = err instanceof RaftAuthError ? err.suggestedNextAction : undefined;
+		return c.json(
+			{
+				error: message,
+				errorCode,
+				reason: err instanceof RaftAuthError ? err.reason : undefined,
+				suggestedNextAction,
+			},
+			status as 400 | 403 | 500,
+			{ "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" },
+		);
 	}
 });
 
