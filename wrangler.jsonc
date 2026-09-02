@@ -29,8 +29,25 @@
 		// on the pro tier (pro=10 mailboxes/agent, free=1). RAFT_OAUTH_* = Login with
 		// Raft Connected App; CLIENT_SECRET is set via `wrangler secret`, not here.
 		"PRO_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada",
-		// Login gated to these raft server_ids (v0: botiverse-only, tygg 2026-07-15).
-		// Empty = unrestricted. Enforce in the OAuth callback via serverAllowed().
+		// Login gated to these raft server_ids. Empty = unrestricted.
+		// Enforced in the OAuth callback via serverAllowed() / isServerAllowed().
+		//
+		// ⚠️ ADDING AN ID HERE GRANTS LOGIN TO EVERY MEMBER OF THAT SERVER.
+		// It is an access-control decision, not configuration. Record who approved
+		// it, right here, in the same commit — a separate doc drifts away from the
+		// value it describes. What login grants: that server's members may sign in
+		// and claim mailboxes in their OWN handle namespace. It does NOT grant
+		// reading anyone else's mailbox (owner scoping), admin/MCP (admin-gated),
+		// or sending outside EXTERNAL_SEND_DOMAINS.
+		//
+		//   95f993fa-2a68-4797-b8ae-7beb7d984ada  botiverse — original v0 gate (tygg, 2026-07-15)
+		//   172dbfbf-3e86-4a85-9331-d4c3f5c1c558  approved by artin, 2026-09-01 (shipped in PR #14)
+		//   65598229-cd0a-4e92-96f3-c33e7e2e4cc1  approved by artin, 2026-09-01 (shipped in PR #14)
+		//
+		// NOTE: since PR #14 this list is no longer the only path — Cloudflare
+		// Flagship flag "server-allowed" can grant login dynamically, with no PR
+		// and no record in this repo. If you are auditing who has access, this file
+		// is necessary but NOT sufficient; check Flagship too.
 		"ALLOWED_SERVER_IDS": "95f993fa-2a68-4797-b8ae-7beb7d984ada,172dbfbf-3e86-4a85-9331-d4c3f5c1c558,65598229-cd0a-4e92-96f3-c33e7e2e4cc1",
 		// RAFT_OAUTH_CLIENT_KEY = the PUBLIC Connected-App client key (e.g. "agentic-inbox").
 		// Used for BOTH the setup client_id AND token-endpoint Basic auth — NEVER the
