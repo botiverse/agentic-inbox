@@ -9,6 +9,7 @@ import { createRequestHandler } from "react-router";
 import { app as apiApp, receiveEmail } from "./index";
 import { EmailMCP } from "./mcp";
 import { resolveKey } from "./lib/keyRegistry";
+import { authApp } from "./routes/auth";
 import type { MailboxContext } from "./lib/mailbox";
 import type { Env } from "./types";
 import { BUILD_SHA, BUILD_TIME } from "./version";
@@ -32,6 +33,7 @@ import {
 	ownerFromPrincipal,
 	raftSetupUrl,
 	isBrowserCallbackFlow,
+	GENERIC_LOGIN_FAILURE,
 } from "./lib/raftAuth";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8h
@@ -312,79 +314,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 });
 
 // ── Login-with-Raft OAuth routes (exempt from the auth middleware above) ──────
-// Browser (human) flow uses CSRF state + authorization_code; agent CLI flow uses
-// the agent_request grant with state forbidden. Both seal a session cookie that the
-// middleware maps to authOwner/authScope/authHandle.
-app.get("/auth/raft/login", async (c) => {
-	const url = new URL(c.req.url);
-	// Agent CLI pre-fetch: do not set a CSRF state cookie in the CLI jar.
-	if (url.searchParams.get("flow") === "agent") {
-		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw));
-		c.header("Cache-Control", "no-store");
-		return c.body(null, 204);
-	}
-	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
-	const config = readRaftConfig(c.env);
-	const state = newLoginState();
-	const callbackUrl = new URL("/auth/raft/callback", c.req.url);
-	// Force https so the callback matches the registered redirect (registered as
-	// https://). A request that arrived over http — e.g. a user typing
-	// `http://mail.build` — would otherwise build an http:// callback and raft
-	// rejects it: "returnUrl does not match registered OAuth client" (dogfood: tygg).
-	// Keep http for local dev (localhost).
-	if (callbackUrl.hostname !== "localhost" && callbackUrl.hostname !== "127.0.0.1") {
-		callbackUrl.protocol = "https:";
-	}
-	const location = raftSetupUrl(config, callbackUrl.toString(), state);
-	c.header("Set-Cookie", loginStateCookie(c.req.raw, state, LOGIN_STATE_TTL_SECONDS));
-	c.header("Cache-Control", "no-store");
-	return c.redirect(location, 302);
-});
-
-app.all("/auth/raft/callback", async (c) => {
-	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
-	const config = readRaftConfig(c.env);
-	const url = new URL(c.req.url);
-	const code = url.searchParams.get("code") ?? "";
-	const presentedState = url.searchParams.get("state");
-	const expectedState = readLoginState(c.req.raw);
-	// Browser flow requires an active login-state cookie from /auth/raft/login; agent flow otherwise.
-	// Tolerates agent handoff requests that include an extraneous `state` query param without a cookie.
-	const browserFlow = isBrowserCallbackFlow(expectedState);
-	try {
-		let token;
-		if (browserFlow) {
-			// CSRF: presented state must match the cookie state (constant-time).
-			if (!presentedState || !expectedState || !(await loginStatesMatch(presentedState, expectedState))) {
-				throw new RaftAuthError("RAFT_STATE_MISMATCH", "token_exchange_failed", 400);
-			}
-			token = await exchangeAuthorizationCode(config, code, url.toString().split("?")[0]);
-		} else {
-			// Agent flow: `code` carries the agent request id; state must be absent.
-			token = await exchangeAgentRequest(config, code);
-		}
-		const userinfo = await fetchUserinfo(config, token.access_token);
-		const principal = validateRaftPrincipal(userinfo, config);
-		const ttl = Math.max(1, Math.min(typeof token.expires_in === "number" ? token.expires_in : SESSION_TTL_SECONDS, SESSION_TTL_SECONDS));
-		const sealed = await sealSession({ principal, expiresAt: Date.now() + ttl * 1000 }, c.env.RAFT_SESSION_SECRET as string);
-		// Two Set-Cookie headers (session + clear login-state) MUST both survive —
-		// use append (c.header replaces by default, which would drop the session cookie).
-		c.header("Set-Cookie", sessionCookie(c.req.raw, sealed, ttl), { append: true });
-		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw), { append: true });
-		c.header("Cache-Control", "no-store");
-		// Browser: bounce to `next` (validated same-origin) or home. Agent: 204.
-		if (browserFlow) {
-			const requested = url.searchParams.get("next") ?? "/";
-			const nextPath = requested.startsWith("/") && !requested.startsWith("//") ? requested : "/";
-			return c.redirect(nextPath, 302);
-		}
-		return c.body(null, 204);
-	} catch (err) {
-		const status = err instanceof RaftAuthError ? err.status : 403;
-		if (err instanceof RaftAuthError) console.warn("[raft-auth]", err.code, err.reason);
-		return c.json({ error: "Login could not be completed." }, status as 400 | 403 | 500, { "Set-Cookie": clearLoginStateCookie(c.req.raw), "Cache-Control": "no-store" });
-	}
-});
+app.route("/", authApp);
 
 // MCP server endpoint — used by AI coding tools (ProtoAgent, Claude Code, Cursor, etc.)
 // Must be before API routes and React Router catch-all

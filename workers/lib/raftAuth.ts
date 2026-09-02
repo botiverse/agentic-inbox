@@ -20,7 +20,8 @@
  */
 
 import type { RaftPrincipal } from "./session";
-import { serverAllowed } from "./auth";
+import type { FlagshipBinding } from "../types";
+import { serverAllowed, isServerAllowed } from "./auth";
 
 export type AuthFailure =
 	| "missing_code"
@@ -33,15 +34,17 @@ export type AuthFailure =
 	| "client_not_allowed"
 	| "wrong_principal_type";
 
-const GENERIC_LOGIN_FAILURE = "Login could not be completed. Please try again or contact the workspace owner.";
+export const GENERIC_LOGIN_FAILURE = "Login could not be completed. Please try again or contact the workspace owner.";
 
 export class RaftAuthError extends Error {
 	constructor(
 		public readonly code: string,
 		public readonly reason: AuthFailure,
 		public readonly status = 403,
+		message?: string,
+		public readonly suggestedNextAction?: string,
 	) {
-		super(GENERIC_LOGIN_FAILURE);
+		super(message || GENERIC_LOGIN_FAILURE);
 		this.name = "RaftAuthError";
 	}
 }
@@ -84,10 +87,23 @@ async function postToken(config: RaftOAuthConfig, body: URLSearchParams, fetchIm
 		headers: { Authorization: basicAuth(config), "Content-Type": "application/x-www-form-urlencoded" },
 		body,
 	});
-	if (!res.ok) throw new RaftAuthError("RAFT_TOKEN_EXCHANGE_FAILED", "token_exchange_failed");
+	if (!res.ok) {
+		throw new RaftAuthError(
+			"RAFT_TOKEN_EXCHANGE_FAILED",
+			"token_exchange_failed",
+			403,
+			`Token exchange with Raft OAuth server failed (HTTP ${res.status}).`,
+			"Verify OAuth client credentials and grant parameters, then retry login.",
+		);
+	}
 	const token = (await res.json().catch(() => null)) as Partial<TokenResponse> | null;
 	if (!token || typeof token.access_token !== "string" || !token.access_token) {
-		throw new RaftAuthError("RAFT_TOKEN_RESPONSE_MALFORMED", "token_response_malformed");
+		throw new RaftAuthError(
+			"RAFT_TOKEN_RESPONSE_MALFORMED",
+			"token_response_malformed",
+			403,
+			"Token response from Raft OAuth server was malformed.",
+		);
 	}
 	return token as TokenResponse;
 }
@@ -99,7 +115,15 @@ export async function exchangeAuthorizationCode(
 	redirectUri: string,
 	fetchImpl: typeof fetch = fetch,
 ): Promise<TokenResponse> {
-	if (!code) throw new RaftAuthError("RAFT_MISSING_CODE", "missing_code", 400);
+	if (!code) {
+		throw new RaftAuthError(
+			"RAFT_MISSING_CODE",
+			"missing_code",
+			400,
+			"Missing authorization code in OAuth callback.",
+			"Restart the login flow from /auth/raft/login.",
+		);
+	}
 	return postToken(config, new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: redirectUri }), fetchImpl);
 }
 
@@ -109,7 +133,15 @@ export async function exchangeAgentRequest(
 	requestId: string,
 	fetchImpl: typeof fetch = fetch,
 ): Promise<TokenResponse> {
-	if (!requestId) throw new RaftAuthError("RAFT_MISSING_CODE", "missing_code", 400);
+	if (!requestId) {
+		throw new RaftAuthError(
+			"RAFT_MISSING_CODE",
+			"missing_code",
+			400,
+			"Missing request_id in agent OAuth callback.",
+			"Retry raft integration login --service agentic-inbox.",
+		);
+	}
 	return postToken(config, new URLSearchParams({ grant_type: "urn:slock:grant-type:agent_request", request_id: requestId }), fetchImpl);
 }
 
@@ -118,9 +150,23 @@ export async function fetchUserinfo(config: RaftOAuthConfig, accessToken: string
 		headers: { Authorization: `Bearer ${accessToken}` },
 		cache: "no-store",
 	});
-	if (!res.ok) throw new RaftAuthError("RAFT_USERINFO_FAILED", "userinfo_failed");
+	if (!res.ok) {
+		throw new RaftAuthError(
+			"RAFT_USERINFO_FAILED",
+			"userinfo_failed",
+			403,
+			`Failed to fetch userinfo from Raft OAuth server (HTTP ${res.status}).`,
+		);
+	}
 	const userinfo = await res.json().catch(() => null);
-	if (!isRecord(userinfo)) throw new RaftAuthError("RAFT_USERINFO_MALFORMED", "userinfo_malformed");
+	if (!isRecord(userinfo)) {
+		throw new RaftAuthError(
+			"RAFT_USERINFO_MALFORMED",
+			"userinfo_malformed",
+			403,
+			"Userinfo response from Raft OAuth server was not a valid JSON object.",
+		);
+	}
 	return userinfo;
 }
 
@@ -130,23 +176,52 @@ export async function fetchUserinfo(config: RaftOAuthConfig, accessToken: string
  * anti-squat treats it as v0 handle; hardening anchors to sub as a fast-follow).
  * Enforces the botiverse-only server allow-list + client_id match here.
  */
-export function validateRaftPrincipal(userinfo: unknown, config: RaftOAuthConfig): RaftPrincipal {
+export async function validateRaftPrincipal(userinfo: unknown, config: RaftOAuthConfig, flags?: FlagshipBinding): Promise<RaftPrincipal> {
 	if (!isRecord(userinfo)) throw new RaftAuthError("RAFT_USERINFO_MALFORMED", "userinfo_malformed");
 	const sub = str(userinfo, "sub");
 	const type = str(userinfo, "type");
 	const serverId = str(userinfo, "server_id");
 	const clientId = str(userinfo, "client_id");
-	if (!sub || !type || !serverId || !clientId) throw new RaftAuthError("RAFT_USERINFO_MALFORMED", "userinfo_malformed");
-	if (type !== "agent" && type !== "human") throw new RaftAuthError("RAFT_PRINCIPAL_TYPE_INVALID", "principal_type_invalid");
+	if (!sub || !type || !serverId || !clientId) {
+		throw new RaftAuthError(
+			"RAFT_USERINFO_MALFORMED",
+			"userinfo_malformed",
+			403,
+			"Userinfo from Raft OAuth server is missing required fields (sub, type, server_id, client_id).",
+		);
+	}
+	if (type !== "agent" && type !== "human") {
+		throw new RaftAuthError(
+			"RAFT_PRINCIPAL_TYPE_INVALID",
+			"principal_type_invalid",
+			403,
+			`Principal type \x27${type}\x27 is invalid (expected \x27agent\x27 or \x27human\x27).`,
+		);
+	}
 	// botiverse-only: server_id must be allow-listed. Login-time gate ONLY (once,
 	// here) — a sealed session is itself proof the server was allowed, so the
 	// per-request middleware trusts the owner and does NOT re-check. Uses the
 	// shared serverAllowed from lib/auth (single source of truth).
-	if (!serverAllowed(serverId, config.allowedServerIds as string[])) {
-		throw new RaftAuthError("RAFT_SERVER_NOT_ALLOWED", "server_not_allowed");
+	const allowed = await isServerAllowed(serverId, config.allowedServerIds as string[], flags);
+	if (!allowed) {
+		throw new RaftAuthError(
+			"RAFT_SERVER_NOT_ALLOWED",
+			"server_not_allowed",
+			403,
+			`Server \x27${serverId}\x27 is not in the allowed servers list for mail.build.`,
+			`Ask a workspace admin to add server ID \x27${serverId}\x27 to ALLOWED_SERVER_IDS or Cloudflare Flagship configuration.`,
+		);
 	}
 	// The token was issued to OUR app; the presented client_id must match the key we authenticate as.
-	if (clientId !== config.clientKey) throw new RaftAuthError("RAFT_CLIENT_NOT_ALLOWED", "client_not_allowed");
+	if (clientId !== config.clientKey) {
+		throw new RaftAuthError(
+			"RAFT_CLIENT_NOT_ALLOWED",
+			"client_not_allowed",
+			403,
+			`Token was issued for client \x27${clientId}\x27, expected \x27${config.clientKey}\x27.`,
+			`Ensure the Login-with-Raft client configuration matches \x27${config.clientKey}\x27.`,
+		);
+	}
 	return {
 		sub,
 		type,

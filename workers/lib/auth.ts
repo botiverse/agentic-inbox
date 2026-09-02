@@ -253,3 +253,62 @@ export function createAllowedByPrefix(
 	if (reserved === callerHandle.toLowerCase()) return true;
 	return !reservedByOtherAccount;
 }
+
+import type { FlagshipBinding } from "../types";
+
+/**
+ * Whether a raft server_id is allowed to sign in.
+ * Evaluates Cloudflare Flagship dynamic flag "server-allowed" first (with context { serverId }),
+ * and falls back to static allowedServerIds from wrangler config.
+ */
+export async function isServerAllowed(
+	serverId: string | null | undefined,
+	allowedServerIds: string[],
+	flags?: FlagshipBinding,
+): Promise<boolean> {
+	if (!serverId) return false;
+	if (flags) {
+		try {
+			if (typeof flags.getBooleanDetails === "function") {
+				const details = await flags.getBooleanDetails("server-allowed", false, { serverId });
+				if (details.reason === "TARGETING_MATCH" || details.reason === "SPLIT") {
+					return details.value;
+				}
+			} else {
+				const flagVal = await flags.getBooleanValue("server-allowed", false, { serverId });
+				if (flagVal) return true;
+			}
+		} catch (err) {
+			console.warn("[flagship] error evaluating server-allowed flag:", err);
+		}
+	}
+	return serverAllowed(serverId, allowedServerIds);
+}
+
+/**
+ * Derive plan for owner with Cloudflare Flagship dynamic flag "pro-tier-server" evaluation.
+ * Explicit TARGETING_MATCH overrides static tiering; default/disabled falls back to static list.
+ */
+export async function getPlanForOwner(
+	owner: string,
+	proServerIds: string[],
+	flags?: FlagshipBinding,
+): Promise<"free" | "pro"> {
+	const sid = serverIdFromOwner(owner);
+	if (flags && sid) {
+		try {
+			if (typeof flags.getBooleanDetails === "function") {
+				const details = await flags.getBooleanDetails("pro-tier-server", false, { serverId: sid });
+				if (details.reason === "TARGETING_MATCH" || details.reason === "SPLIT") {
+					return details.value ? "pro" : "free";
+				}
+			} else {
+				const isPro = await flags.getBooleanValue("pro-tier-server", false, { serverId: sid });
+				if (isPro) return "pro";
+			}
+		} catch (err) {
+			console.warn("[flagship] error evaluating pro-tier-server flag:", err);
+		}
+	}
+	return planForOwner(owner, proServerIds);
+}
