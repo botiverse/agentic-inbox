@@ -17,6 +17,7 @@ import {
 	getFullEmail,
 	unsupportedSendFields,
 	cleanSnippet,
+	publicFromTo,
 } from "./lib/email-helpers";
 import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
 import { runInboundNotify } from "./lib/agentEvents";
@@ -28,6 +29,7 @@ import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
 import { requireMailbox, type MailboxContext } from "./lib/mailbox";
+import type { MailboxDO } from "./durableObject";
 
 type AppContext = Context<MailboxContext>;
 
@@ -100,9 +102,9 @@ async function deliverToInbox(
 	waitUntil: ((p: Promise<unknown>) => void) | undefined,
 	env: Env,
 	mailbox: string,
-	stub: { createEmail: (folder: string, email: Record<string, unknown>, attachments: unknown[]) => Promise<{ created: boolean; id: string }> },
-	email: Record<string, unknown> & { id: string; sender: string; subject: string; message_id?: string | null },
-	attachments: unknown[],
+	stub: DurableObjectStub<MailboxDO>,
+	email: Parameters<MailboxDO["createEmail"]>[1],
+	attachments: Parameters<MailboxDO["createEmail"]>[2],
 ): Promise<{ created: boolean; id: string }> {
 	const created = await stub.createEmail(Folders.INBOX, email, attachments);
 	scheduleInboxNotify(waitUntil, env, {
@@ -407,7 +409,7 @@ app.delete("/api/v1/mailboxes/:mailboxId/keys/:keyId", async (c: AppContext) => 
 // break-freely). Gogo's PR then drops sender/recipient + moves snippet to a column.
 function canonicalRows<T extends { snippet?: string | null; sender?: string | null; recipient?: string | null }>(rows: T[]): T[] {
 	return rows.map((e) =>
-		e ? ({ ...e, ...(e.snippet ? { snippet: cleanSnippet(e.snippet) } : {}), from: e.sender, to: e.recipient }) : e,
+		e ? ({ ...e, ...(e.snippet ? { snippet: cleanSnippet(e.snippet) } : {}), ...publicFromTo(e) }) : e,
 	);
 }
 
@@ -645,7 +647,7 @@ app.get("/api/v1/mailboxes/:mailboxId/emails/:emailId", async (c: AppContext) =>
 	const includes = new Set((c.req.query("include") || "").split(",").map((s) => s.trim()).filter(Boolean));
 	const e = email as typeof email & { sender?: string; recipient?: string; body?: string | null; raw_headers?: string | null };
 	const { body: rawBody, raw_headers: rawHeaders, ...lean } = e;
-	const withContract: Record<string, unknown> = { ...lean, from: e.sender, to: e.recipient };
+	const withContract: Record<string, unknown> = { ...lean, ...publicFromTo(e) };
 	if (includes.has("raw_body")) withContract.body = rawBody;
 	if (includes.has("raw_headers")) withContract.raw_headers = rawHeaders;
 	return c.json(withContract);

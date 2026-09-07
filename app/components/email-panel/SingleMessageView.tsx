@@ -4,7 +4,7 @@
 
 import EmailAttachmentList from "~/components/EmailAttachmentList";
 import EmailIframe from "~/components/EmailIframe";
-import { formatDetailDate, rewriteInlineImages, emailBodyHtml } from "~/lib/utils";
+import { avatarInitial, formatDetailDate, rewriteInlineImages, emailBodyHtml } from "~/lib/utils";
 import type { Email } from "~/types";
 
 interface SingleMessageViewProps {
@@ -24,7 +24,7 @@ export default function SingleMessageView({
 				<div className="flex items-center justify-between gap-3">
 					<div className="flex items-center gap-2.5 min-w-0">
 						<div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-kumo-fill text-xs font-bold text-kumo-default">
-							{email.from.charAt(0).toUpperCase()}
+							{avatarInitial(email.from)}
 						</div>
 						<div className="min-w-0">
 							<div className="text-sm font-medium text-kumo-default truncate">

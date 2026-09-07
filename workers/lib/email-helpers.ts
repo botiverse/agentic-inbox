@@ -355,6 +355,11 @@ export function unsupportedSendFields(
  * NOT clip trailing `<` in full body_text. (AX: Yingjun — snippet fragments.)
  * Gogo's durable fix persists this at ingest; this is the shared strip semantic.
  */
+/** API from/to aliases over stored sender/recipient. Never undefined — UI avatars call charAt. */
+export function publicFromTo(row: { sender?: string | null; recipient?: string | null }): { from: string; to: string } {
+	return { from: row.sender ?? "", to: row.recipient ?? "" };
+}
+
 export function cleanSnippet(raw: string | null | undefined, maxLen = 300): string {
 	if (!raw) return "";
 	return stripHtmlToText(raw.replace(/<[^>]*$/, "")).slice(0, maxLen);
