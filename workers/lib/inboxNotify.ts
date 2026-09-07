@@ -32,14 +32,16 @@ export type NotifyDecision =
 	| { action: "skip"; reason: NotifySkipReason };
 
 export type NotifySkipReason =
-	| "disabled"
 	| "orphan"
 	| "human_owner"
 	| "muted"
 	| "missing_routing"
-	| "routing_mismatch";
+	| "routing_mismatch"
+	| "not_configured";
 
 const EVENT_ID_MAX = 200;
+/** Hex chars of SHA-256(full raw id) appended when the raw id exceeds 200. */
+const EVENT_ID_HASH_HEX = 16;
 
 /** Parse `raft:${serverId}:${type}:${sub}`. Anything else (incl. local:admin) is not a Raft owner. */
 export function parseOwner(owner: string | null | undefined): OwnerParts | null {
@@ -67,19 +69,12 @@ export function routingFromPrincipal(p: {
 	return { serverId: p.serverId, serverSlug, agentId: p.sub, agentName };
 }
 
-export function notifyEnabled(flag: string | undefined | null): boolean {
-	const v = (flag || "").trim().toLowerCase();
-	return v === "1" || v === "true" || v === "yes";
-}
-
 export function decideNotify(input: {
-	enabled: boolean;
 	owner: string | null | undefined;
 	/** Explicit false is sticky mute. Undefined/true = notify. */
 	notifyInbox?: boolean | null;
 	routing: InboxNotifyRouting | null | undefined;
 }): NotifyDecision {
-	if (!input.enabled) return { action: "skip", reason: "disabled" };
 	const parts = parseOwner(input.owner);
 	if (!parts) return { action: "skip", reason: "orphan" };
 	if (parts.type === "human") return { action: "skip", reason: "human_owner" };
@@ -91,13 +86,29 @@ export function decideNotify(input: {
 	return { action: "notify", routing: input.routing };
 }
 
-/** Core `externalEventId` — unique per app + target agent, ≤ 200 chars. */
-export function externalEventId(mailbox: string, rfcMessageId: string | null | undefined, fallbackId: string): string {
+async function sha256Hex(s: string, n: number): Promise<string> {
+	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+	const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+	return hex.slice(0, n);
+}
+
+/**
+ * Core `externalEventId` — unique per app + target agent, ≤ 200 chars.
+ * Over-length: keep a prefix and append SHA-256 of the *full* raw id (not a
+ * slice). Truncating would collide two long Message-IDs that share a prefix.
+ */
+export async function externalEventId(
+	mailbox: string,
+	rfcMessageId: string | null | undefined,
+	fallbackId: string,
+): Promise<string> {
 	const mbox = (mailbox || "").trim().toLowerCase();
 	const rfc = (rfcMessageId || "").trim();
 	const raw = rfc ? `mail.build:${mbox}:${rfc}` : `mail.build:${mbox}:id:${fallbackId}`;
 	if (raw.length <= EVENT_ID_MAX) return raw;
-	return raw.slice(0, EVENT_ID_MAX);
+	const hash = await sha256Hex(raw, EVENT_ID_HASH_HEX);
+	const prefixLen = EVENT_ID_MAX - 1 - EVENT_ID_HASH_HEX;
+	return `${raw.slice(0, prefixLen)}:${hash}`;
 }
 
 export function notifySummary(mailbox: string, from: string, subject: string): string {

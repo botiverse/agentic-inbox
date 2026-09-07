@@ -176,9 +176,8 @@ describe("runInboundNotify", () => {
 		agentId: "agent-uuid",
 		agentName: "postel",
 	};
-	function env(settings: unknown, flag = "true") {
+	function env(settings: unknown) {
 		return {
-			AGENT_INBOX_NOTIFY_ENABLED: flag,
 			RAFT_API_ORIGIN: "https://api.raft.build",
 			RAFT_OAUTH_CLIENT_KEY: "agentic-inbox",
 			RAFT_OAUTH_CLIENT_SECRET: "s3cret",
@@ -194,11 +193,6 @@ describe("runInboundNotify", () => {
 		subject: "code",
 		rfcMessageId: "<m@x>",
 	};
-
-	it("skips when the delivery flag is off", async () => {
-		const r = await runInboundNotify(env({ owner: "raft:s1:agent:agent-uuid" }, "false"), mail);
-		expect(r).toEqual({ skipped: "disabled" });
-	});
 
 	it("skips ownerless mailboxes", async () => {
 		const r = await runInboundNotify(env({}), mail);

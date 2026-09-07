@@ -74,6 +74,47 @@ function boolQuery(c: AppContext, key: string): boolean | undefined {
 	return v === "true" || v === "1";
 }
 
+function scheduleInboxNotify(
+	waitUntil: ((p: Promise<unknown>) => void) | undefined,
+	env: Env,
+	input: { mailbox: string; emailId: string; from: string; subject: string; rfcMessageId: string | null },
+) {
+	const p = runInboundNotify(env, input).then((r) => {
+		if (r.closedError) console.log(`inbox notify: ${r.closedError}`);
+		else if (r.skipped) console.log(`inbox notify skipped: ${r.skipped}`);
+	}).catch((e) => console.error("inbox notify failed:", (e as Error).message));
+	if (typeof waitUntil === "function") waitUntil(p);
+}
+
+function honoWaitUntil(c: AppContext): ((p: Promise<unknown>) => void) | undefined {
+	try {
+		return c.executionCtx.waitUntil.bind(c.executionCtx);
+	} catch {
+		// app.request() in unit tests has no ExecutionContext.
+		return undefined;
+	}
+}
+
+/** Every path that lands mail in INBOX must go through here so Agent Inbox wake cannot be forgotten on one ingress. */
+async function deliverToInbox(
+	waitUntil: ((p: Promise<unknown>) => void) | undefined,
+	env: Env,
+	mailbox: string,
+	stub: { createEmail: (folder: string, email: Record<string, unknown>, attachments: unknown[]) => Promise<{ created: boolean; id: string }> },
+	email: Record<string, unknown> & { id: string; sender: string; subject: string; message_id?: string | null },
+	attachments: unknown[],
+): Promise<{ created: boolean; id: string }> {
+	const created = await stub.createEmail(Folders.INBOX, email, attachments);
+	scheduleInboxNotify(waitUntil, env, {
+		mailbox,
+		emailId: created.id,
+		from: email.sender,
+		subject: email.subject,
+		rfcMessageId: email.message_id ?? null,
+	});
+	return created;
+}
+
 // -- App & middleware -----------------------------------------------
 
 const app = new Hono<MailboxContext>();
@@ -526,9 +567,9 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	if (isInternal) {
 		// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
 		const toStub = mailboxStub(c.env, toMailbox);
-		await toStub.createEmail(Folders.INBOX, { id: messageId, ...common }, []);
+		const created = await deliverToInbox(honoWaitUntil(c), c.env, toMailbox, toStub, { id: messageId, ...common }, []);
 		await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
-		return c.json({ id: messageId, status: "sent", delivery: "internal" }, 202);
+		return c.json({ id: created.id, status: "sent", delivery: "internal" }, 202);
 	}
 
 	// External: hand to Cloudflare Email Sending. Failures are reported LOUDLY —
@@ -828,7 +869,7 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 
 	const originalMessageId = parsedEmail.messageId ? extractMsgId(parsedEmail.messageId) : null;
 
-	const created = await stub.createEmail(Folders.INBOX, {
+	const created = await deliverToInbox(ctx.waitUntil.bind(ctx), env, deliveryAddress, stub, {
 		id: messageId, subject: parsedEmail.subject || "",
 		sender: (parsedEmail.from?.address || "").toLowerCase(), recipient: allRecipients.join(", "),
 		cc: ccRecipients.join(", ") || null, bcc: bccRecipients.join(", ") || null,
@@ -838,20 +879,6 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
 	}, attachmentData);
 	const storedId = created.id;
-
-	// Wake the owner Agent Inbox. Duplicate SMTP deliveries reuse the same
-	// RFC Message-ID → same externalEventId, so Core de-dupes. Failures must
-	// not bounce the mail. Delivery is gated by AGENT_INBOX_NOTIFY_ENABLED.
-	ctx.waitUntil(runInboundNotify(env, {
-		mailbox: deliveryAddress,
-		emailId: storedId,
-		from: (parsedEmail.from?.address || "").toLowerCase(),
-		subject: parsedEmail.subject || "",
-		rfcMessageId: originalMessageId,
-	}).then((r) => {
-		if (r.closedError) console.log(`inbox notify: ${r.closedError}`);
-		else if (r.skipped && r.skipped !== "disabled") console.log(`inbox notify skipped: ${r.skipped}`);
-	}).catch((e) => console.error("inbox notify failed:", (e as Error).message)));
 
 	// Built-in AI auto-draft is OPT-IN and OFF by default. Firing it on every
 	// inbound email would (a) run Workers AI ~3-4× per message = a real cost driver,

@@ -237,7 +237,10 @@ describe("internal send resolves a +tag recipient to its base mailbox", () => {
 			MAILBOX: {
 				idFromName: (n: string) => { doNames.push(n); return n; },
 				get: () => ({
-					createEmail: async (_f: string, row: { recipient?: string }) => { stored.push(row); },
+					createEmail: async (_f: string, row: { recipient?: string; id?: string }) => {
+						stored.push(row);
+						return { created: true, id: row.id || "id" };
+					},
 					checkSendRateLimit: async () => null,
 				}),
 			},
@@ -295,7 +298,10 @@ describe("send routing: internal / allow-listed external / refused", () => {
 			MAILBOX: {
 				idFromName: (n: string) => n,
 				get: () => ({
-					createEmail: async (folder: string, row: Record<string, unknown>) => { stored.push({ folder, row }); },
+					createEmail: async (folder: string, row: Record<string, unknown>) => {
+						stored.push({ folder, row });
+						return { created: true, id: (row.id as string) || "id" };
+					},
 					checkSendRateLimit: async () => null,
 				}),
 			},

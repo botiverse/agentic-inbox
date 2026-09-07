@@ -6,7 +6,6 @@ import { describe, it, expect } from "vitest";
 import {
 	parseOwner,
 	routingFromPrincipal,
-	notifyEnabled,
 	decideNotify,
 	externalEventId,
 	notifySummary,
@@ -47,62 +46,55 @@ describe("routingFromPrincipal", () => {
 	});
 });
 
-describe("notifyEnabled", () => {
-	it("is off unless an explicit truthy flag", () => {
-		expect(notifyEnabled(undefined)).toBe(false);
-		expect(notifyEnabled("")).toBe(false);
-		expect(notifyEnabled("0")).toBe(false);
-		expect(notifyEnabled("1")).toBe(true);
-		expect(notifyEnabled("true")).toBe(true);
-	});
-});
-
 describe("decideNotify", () => {
 	const owner = "raft:s1:agent:agent-uuid";
-	it("notifies an agent owner when enabled and routing matches", () => {
-		expect(decideNotify({ enabled: true, owner, routing })).toEqual({ action: "notify", routing });
-	});
-	it("skips when the delivery flag is off", () => {
-		expect(decideNotify({ enabled: false, owner, routing })).toEqual({ action: "skip", reason: "disabled" });
+	it("notifies an agent owner when routing matches", () => {
+		expect(decideNotify({ owner, routing })).toEqual({ action: "notify", routing });
 	});
 	it("skips ownerless mailboxes instead of pretending someone is there", () => {
-		expect(decideNotify({ enabled: true, owner: null, routing })).toEqual({ action: "skip", reason: "orphan" });
+		expect(decideNotify({ owner: null, routing })).toEqual({ action: "skip", reason: "orphan" });
 	});
 	it("skips human-owned mailboxes (agent-events requires an agent token)", () => {
-		expect(decideNotify({ enabled: true, owner: "raft:s1:human:h1", routing })).toEqual({
+		expect(decideNotify({ owner: "raft:s1:human:h1", routing })).toEqual({
 			action: "skip", reason: "human_owner",
 		});
 	});
 	it("honours sticky mute without releasing the mailbox", () => {
-		expect(decideNotify({ enabled: true, owner, routing, notifyInbox: false })).toEqual({
+		expect(decideNotify({ owner, routing, notifyInbox: false })).toEqual({
 			action: "skip", reason: "muted",
 		});
 	});
 	it("skips when login never cached slug+handle", () => {
-		expect(decideNotify({ enabled: true, owner, routing: null })).toEqual({
+		expect(decideNotify({ owner, routing: null })).toEqual({
 			action: "skip", reason: "missing_routing",
 		});
 	});
 	it("skips when cached routing does not match the owner UUID", () => {
 		expect(decideNotify({
-			enabled: true, owner, routing: { ...routing, agentId: "someone-else" },
+			owner, routing: { ...routing, agentId: "someone-else" },
 		})).toEqual({ action: "skip", reason: "routing_mismatch" });
 		expect(decideNotify({
-			enabled: true, owner, routing: { ...routing, serverId: "other-server" },
+			owner, routing: { ...routing, serverId: "other-server" },
 		})).toEqual({ action: "skip", reason: "routing_mismatch" });
 	});
 });
 
 describe("externalEventId", () => {
-	it("keys on mailbox + RFC Message-ID", () => {
-		expect(externalEventId("Postel@mail.build", "<abc@x>", "uuid")).toBe("mail.build:postel@mail.build:<abc@x>");
+	it("keys on mailbox + RFC Message-ID", async () => {
+		expect(await externalEventId("Postel@mail.build", "<abc@x>", "uuid")).toBe("mail.build:postel@mail.build:<abc@x>");
 	});
-	it("falls back to the internal id when Message-ID is missing", () => {
-		expect(externalEventId("a@mail.build", null, "id-1")).toBe("mail.build:a@mail.build:id:id-1");
+	it("falls back to the internal id when Message-ID is missing", async () => {
+		expect(await externalEventId("a@mail.build", null, "id-1")).toBe("mail.build:a@mail.build:id:id-1");
 	});
-	it("caps at 200 characters", () => {
-		const long = "x".repeat(300);
-		expect(externalEventId("a@mail.build", long, "id").length).toBe(200);
+	it("keeps over-long ids unique instead of truncating", async () => {
+		const a = "x".repeat(250) + "A";
+		const b = "x".repeat(250) + "B";
+		const idA = await externalEventId("a@mail.build", a, "id");
+		const idB = await externalEventId("a@mail.build", b, "id");
+		expect(idA.length).toBe(200);
+		expect(idB.length).toBe(200);
+		expect(idA).not.toBe(idB);
+		expect(idA.slice(-17)).toMatch(/^:[0-9a-f]{16}$/);
 	});
 });
 

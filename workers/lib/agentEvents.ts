@@ -13,7 +13,6 @@
 import {
 	decideNotify,
 	externalEventId,
-	notifyEnabled,
 	notifyPayload,
 	notifySummary,
 	type InboxNotifyRouting,
@@ -175,7 +174,6 @@ export async function postAgentNotification(
 }
 
 type NotifyEnv = {
-	AGENT_INBOX_NOTIFY_ENABLED?: string;
 	RAFT_API_ORIGIN?: string;
 	RAFT_OAUTH_CLIENT_KEY?: string;
 	RAFT_OAUTH_CLIENT_SECRET?: string;
@@ -197,7 +195,6 @@ export async function runInboundNotify(
 	},
 	fetchImpl: typeof fetch = fetch,
 ): Promise<{ skipped?: string; post?: AgentEventPostResult; closedError?: string }> {
-	if (!notifyEnabled(env.AGENT_INBOX_NOTIFY_ENABLED)) return { skipped: "disabled" };
 	if (!env.RAFT_API_ORIGIN || !env.RAFT_OAUTH_CLIENT_KEY || !env.RAFT_OAUTH_CLIENT_SECRET) {
 		return { skipped: "not_configured" };
 	}
@@ -207,7 +204,6 @@ export async function runInboundNotify(
 		inboxNotify?: InboxNotifyRouting;
 	}>(env as never, input.mailbox);
 	const decision = decideNotify({
-		enabled: true,
 		owner: settings?.owner,
 		notifyInbox: settings?.notifyInbox,
 		routing: settings?.inboxNotify,
@@ -240,7 +236,7 @@ export async function runInboundNotify(
 					subject: input.subject,
 					rfcMessageId: input.rfcMessageId,
 				}),
-				externalEventId: externalEventId(input.mailbox, input.rfcMessageId, input.emailId),
+				externalEventId: await externalEventId(input.mailbox, input.rfcMessageId, input.emailId),
 			},
 			fetchImpl,
 		);
