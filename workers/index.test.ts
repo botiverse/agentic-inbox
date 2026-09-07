@@ -361,3 +361,62 @@ describe("send routing: internal / allow-listed external / refused", () => {
 		expect(stored).toHaveLength(0); // and it is NOT filed as Sent
 	});
 });
+
+// Structural teeth: wake is bound to "landed in INBOX", not to one ingress.
+// Verified to go red: add a second `createEmail(Folders.INBOX` outside
+// deliverToInbox and this fails. (Gogo / artin 2026-09-07)
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+describe("INBOX writes only go through deliverToInbox", () => {
+	function walk(dir: string): string[] {
+		const out: string[] = [];
+		for (const ent of readdirSync(dir, { withFileTypes: true })) {
+			const p = join(dir, ent.name);
+			if (ent.isDirectory()) {
+				if (ent.name === "node_modules" || ent.name === "build") continue;
+				out.push(...walk(p));
+			} else if (ent.name.endsWith(".ts") && !ent.name.endsWith(".test.ts")) out.push(p);
+		}
+		return out;
+	}
+
+	it("has exactly one createEmail(Folders.INBOX) and it lives inside deliverToInbox", () => {
+		const files = walk(join(import.meta.dirname));
+		const hits: Array<{ file: string; line: number; inDeliver: boolean }> = [];
+		for (const file of files) {
+			const text = readFileSync(file, "utf8");
+			const fn = text.indexOf("async function deliverToInbox");
+			let bodyStart = -1;
+			let bodyEnd = -1;
+			if (fn >= 0) {
+				// Skip the parameter/return-type braces (`stub: { … }`, `Promise<{ … }>`).
+				const marker = "\n): Promise<{ created: boolean; id: string }> {";
+				const sigEnd = text.indexOf(marker, fn);
+				bodyStart = sigEnd >= 0 ? sigEnd + marker.length - 1 : -1;
+				let depth = 0;
+				for (let i = bodyStart; i >= 0 && i < text.length; i++) {
+					if (text[i] === "{") depth++;
+					else if (text[i] === "}") {
+						depth--;
+						if (depth === 0) {
+							bodyEnd = i;
+							break;
+						}
+					}
+				}
+			}
+			const re = /createEmail\(\s*Folders\.INBOX/g;
+			let m: RegExpExecArray | null;
+			while ((m = re.exec(text))) {
+				hits.push({
+					file,
+					line: text.slice(0, m.index).split("\n").length,
+					inDeliver: bodyStart >= 0 && m.index > bodyStart && m.index < bodyEnd,
+				});
+			}
+		}
+		expect(hits.filter((h) => !h.inDeliver), `INBOX writes outside deliverToInbox: ${JSON.stringify(hits)}`).toEqual([]);
+		expect(hits.filter((h) => h.inDeliver)).toHaveLength(1);
+	});
+});
