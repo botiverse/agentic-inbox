@@ -33,6 +33,8 @@ describe("parseOwner", () => {
 });
 
 describe("routingFromPrincipal", () => {
+	const botiverseId = "95f993fa-2a68-4797-b8ae-7beb7d984ada";
+
 	it("requires agent + slug + handle; handle is a routing hint not the owner key", () => {
 		expect(routingFromPrincipal({
 			type: "agent", sub: "abc", serverId: "s1", serverSlug: "botiverse", preferredUsername: "Postel",
@@ -42,6 +44,50 @@ describe("routingFromPrincipal", () => {
 		})).toBeNull();
 		expect(routingFromPrincipal({
 			type: "agent", sub: "abc", serverId: "s1", serverSlug: null, preferredUsername: "Postel",
+		})).toBeNull();
+		// Other allow-listed servers are not in the slug map: old sessions stay fail-closed.
+		expect(routingFromPrincipal({
+			type: "agent",
+			sub: "abc",
+			serverId: "172dbfbf-3e86-4a85-9331-d4c3f5c1c558",
+			serverSlug: null,
+			preferredUsername: "Postel",
+		})).toBeNull();
+	});
+
+	it("fills slug from the known serverId map when a pre-deploy session omitted it", () => {
+		const expected = {
+			serverId: botiverseId, serverSlug: "botiverse", agentId: "abc", agentName: "Gogo",
+		};
+		expect(routingFromPrincipal({
+			type: "agent", sub: "abc", serverId: botiverseId, serverSlug: null, preferredUsername: "Gogo",
+		})).toEqual(expected);
+		expect(routingFromPrincipal({
+			type: "agent", sub: "abc", serverId: botiverseId, serverSlug: "", preferredUsername: "Gogo",
+		})).toEqual(expected);
+		expect(routingFromPrincipal({
+			type: "agent", sub: "abc", serverId: botiverseId, preferredUsername: "Gogo",
+		})).toEqual(expected);
+	});
+
+	it("prefers the userinfo slug over the known-id map", () => {
+		expect(routingFromPrincipal({
+			type: "agent",
+			sub: "abc",
+			serverId: botiverseId,
+			serverSlug: "renamed",
+			preferredUsername: "Gogo",
+		})).toEqual({
+			serverId: botiverseId, serverSlug: "renamed", agentId: "abc", agentName: "Gogo",
+		});
+	});
+
+	it("still fails closed without a handle, even on a known serverId", () => {
+		expect(routingFromPrincipal({
+			type: "agent", sub: "abc", serverId: botiverseId, serverSlug: null, preferredUsername: null,
+		})).toBeNull();
+		expect(routingFromPrincipal({
+			type: "human", sub: "h1", serverId: botiverseId, serverSlug: null, preferredUsername: "artin",
 		})).toBeNull();
 	});
 });

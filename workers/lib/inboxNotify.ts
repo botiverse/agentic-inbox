@@ -43,6 +43,15 @@ const EVENT_ID_MAX = 200;
 /** Hex chars of SHA-256(full raw id) appended when the raw id exceeds 200. */
 const EVENT_ID_HASH_HEX = 16;
 
+/**
+ * Routing-only fallback when a sealed session predates `server_slug` in userinfo.
+ * Identity remains the server UUID; Core's agent-request API still selects by slug.
+ * Unknown serverIds stay fail-closed (null routing) until a fresh login stamps slug.
+ */
+const SERVER_SLUG_BY_ID: Record<string, string> = {
+	"95f993fa-2a68-4797-b8ae-7beb7d984ada": "botiverse",
+};
+
 /** Parse `raft:${serverId}:${type}:${sub}`. Anything else (incl. local:admin) is not a Raft owner. */
 export function parseOwner(owner: string | null | undefined): OwnerParts | null {
 	if (!owner) return null;
@@ -52,8 +61,9 @@ export function parseOwner(owner: string | null | undefined): OwnerParts | null 
 }
 
 /**
- * Routing cache from a validated login principal. Requires agent + slug + handle.
- * Missing any of those → null (fail closed on notify, mailbox still receives).
+ * Routing cache from a validated login principal. Requires agent + handle, and a
+ * slug from userinfo or the known-id map. Missing any of those → null (fail
+ * closed on notify, mailbox still receives).
  */
 export function routingFromPrincipal(p: {
 	type: string;
@@ -63,7 +73,8 @@ export function routingFromPrincipal(p: {
 	preferredUsername?: string | null;
 }): InboxNotifyRouting | null {
 	if (p.type !== "agent") return null;
-	const serverSlug = (p.serverSlug || "").trim();
+	const fromUserinfo = (p.serverSlug || "").trim();
+	const serverSlug = fromUserinfo || SERVER_SLUG_BY_ID[p.serverId] || "";
 	const agentName = (p.preferredUsername || "").trim();
 	if (!p.sub || !p.serverId || !serverSlug || !agentName) return null;
 	return { serverId: p.serverId, serverSlug, agentId: p.sub, agentName };
