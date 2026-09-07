@@ -35,6 +35,7 @@ import {
 	isBrowserCallbackFlow,
 	GENERIC_LOGIN_FAILURE,
 } from "./lib/raftAuth";
+import { routingFromPrincipal } from "./lib/inboxNotify";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8h
 const LOGIN_STATE_TTL_SECONDS = 600; // 10min
@@ -164,6 +165,7 @@ app.use("*", async (c, next) => {
 			c.set("authScope", "account");
 			c.set("authIsAdmin", false);
 			if (session.principal.preferredUsername) c.set("authHandle", session.principal.preferredUsername);
+			c.set("authNotifyRouting", routingFromPrincipal(session.principal));
 			return next();
 		}
 	}

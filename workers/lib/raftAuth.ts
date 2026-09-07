@@ -229,6 +229,7 @@ export async function validateRaftPrincipal(userinfo: unknown, config: RaftOAuth
 		clientId,
 		preferredUsername: str(userinfo, "preferred_username"),
 		name: str(userinfo, "name"),
+		serverSlug: str(userinfo, "server_slug"),
 	};
 }
 

@@ -52,11 +52,12 @@ describe("POST /api/v1/mailboxes — body validation", () => {
 // mailbox lookup → reject-or-deliver) with a fake message + env, because the
 // setReject wiring is precisely the kind of thing that silently regresses.
 
-function rawEmail(to: string): { stream: ReadableStream; size: number } {
+function rawEmail(to: string, extraHeaders: string[] = []): { stream: ReadableStream; size: number } {
 	const text = [
 		"From: sender@example.com",
 		`To: ${to}`,
 		"Subject: hello",
+		...extraHeaders,
 		"",
 		"body text",
 		"",
@@ -73,8 +74,10 @@ function rawEmail(to: string): { stream: ReadableStream; size: number } {
 function envWithMailboxes(existing: string[]) {
 	const heads: string[] = [];
 	const doNames: string[] = [];
-	const stored: Array<{ recipient?: string }> = [];
+	const stored: Array<{ recipient?: string; message_id?: string | null; id?: string }> = [];
 	const sent: unknown[] = [];
+	const waited: Promise<unknown>[] = [];
+	const seenMsg = new Map<string, string>();
 	const env = {
 		// Production's `env.EMAIL` binding is UNRESTRICTED (it can mail any address —
 		// it has to, for replies/forwards). So nothing at the platform layer stops a
@@ -93,21 +96,30 @@ function envWithMailboxes(existing: string[]) {
 		MAILBOX: {
 			idFromName: (n: string) => { doNames.push(n); return n; },
 			get: () => ({
-				createEmail: async (_folder: string, row: { recipient?: string }) => { stored.push(row); },
+				createEmail: async (_folder: string, row: { recipient?: string; message_id?: string | null; id?: string }) => {
+					if (row.message_id && seenMsg.has(row.message_id)) {
+						return { created: false, id: seenMsg.get(row.message_id)! };
+					}
+					const id = row.id || crypto.randomUUID();
+					if (row.message_id) seenMsg.set(row.message_id, id);
+					stored.push({ ...row, id });
+					return { created: true, id };
+				},
 				findThreadBySubject: async () => null,
 			}),
 		},
 		EMAIL_AGENT: { idFromName: (n: string) => n, get: () => ({ fetch: async () => new Response("") }) },
 	} as never;
-	return { heads, doNames, stored, sent, env };
+	return { heads, doNames, stored, sent, waited, env };
 }
 
-async function deliver(to: string, existing: string[]) {
-	const { stream, size } = rawEmail(to);
+async function deliver(to: string, existing: string[], extraHeaders: string[] = []) {
+	const { stream, size } = rawEmail(to, extraHeaders);
 	const rejects: string[] = [];
-	const { heads, doNames, stored, sent, env } = envWithMailboxes(existing);
+	const { heads, doNames, stored, sent, waited, env } = envWithMailboxes(existing);
 	const event = { raw: stream, rawSize: size, setReject: (r: string) => rejects.push(r) };
-	await receiveEmail(event, env, { waitUntil() {} } as never);
+	await receiveEmail(event, env, { waitUntil(p: Promise<unknown>) { waited.push(p); } } as never);
+	await Promise.allSettled(waited);
 	return { rejects, heads, doNames, stored, sent };
 }
 
@@ -157,6 +169,13 @@ describe("inbound: unknown recipient is REJECTED in-session, never silently drop
 		const { rejects, sent } = await deliver("nobody@mail.build", []);
 		expect(rejects).toHaveLength(1);
 		expect(sent).toHaveLength(0);
+	});
+});
+
+describe("inbound: RFC Message-ID is stored and de-duped", () => {
+	it("keeps the RFC Message-ID on the stored row", async () => {
+		const { stored } = await deliver("artin@mail.build", ["artin@mail.build"], ["Message-ID: <abc@example.com>"]);
+		expect(stored[0].message_id).toBe("abc@example.com");
 	});
 });
 

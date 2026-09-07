@@ -19,6 +19,7 @@ import {
 	cleanSnippet,
 } from "./lib/email-helpers";
 import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
+import { runInboundNotify } from "./lib/agentEvents";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
 import { maxMailboxesForPlan, planForOwner, getPlanForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart } from "./lib/auth";
@@ -209,7 +210,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// rejected cleanly, and an ownerless mailbox is adopted rather than 409'd.
 	const key = mailboxKey(email);
 	const existingObj = await c.env.BUCKET.get(key);
-	let existingSettings: (Record<string, unknown> & { owner?: string; fromName?: string }) | null = null;
+	let existingSettings: (Record<string, unknown> & { owner?: string; fromName?: string; inboxNotify?: unknown }) | null = null;
 	if (existingObj) {
 		existingSettings = (await existingObj.json()) as Record<string, unknown> & { owner?: string; fromName?: string };
 		// Ownership disposition. Anti-squat namespace already enforced above, so an
@@ -217,7 +218,14 @@ app.post("/api/v1/mailboxes", async (c) => {
 		// admin-provisioned canonical <handle>@). (dogfood: Gogo/Box — 7/13 orphans.)
 		const action = classifyClaim(true, existingSettings.owner, owner);
 		if (action === "idempotent") {
-			// Already yours — no new key minted.
+			// Already yours — no new key minted. Refresh notify routing from this
+			// login so older mailboxes pick up slug+handle without a re-create.
+			const notifyRouting = c.get("authNotifyRouting");
+			if (notifyRouting && JSON.stringify(existingSettings.inboxNotify) !== JSON.stringify(notifyRouting)) {
+				const updated = { ...existingSettings, inboxNotify: notifyRouting };
+				await c.env.BUCKET.put(key, JSON.stringify(updated));
+				return c.json({ id: email, email, name: existingSettings.fromName || name, owner, settings: updated }, 200);
+			}
 			return c.json({ id: email, email, name: existingSettings.fromName || name, owner, settings: existingSettings }, 200);
 		}
 		if (action === "taken") {
@@ -231,9 +239,12 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// Adoption preserves the existing mailbox settings (and its stored mail);
 	// a fresh claim starts from defaults. Either way `owner` is stamped as the
 	// source of truth for API access scoping.
+	// inboxNotify is login-time routing (slug+handle) for Agent Inbox wake —
+	// never taken from the caller-supplied `settings` body.
+	const notifyRouting = c.get("authNotifyRouting");
 	const finalSettings = adopting
-		? { ...(existingSettings as Record<string, unknown>), owner }
-		: { ...defaultSettings, ...settings, owner };
+		? { ...(existingSettings as Record<string, unknown>), owner, ...(notifyRouting ? { inboxNotify: notifyRouting } : {}) }
+		: { ...defaultSettings, ...settings, owner, ...(notifyRouting ? { inboxNotify: notifyRouting } : {}) };
 	const displayName = (finalSettings as { fromName?: string }).fromName || name;
 
 	// Tier quota (a fresh claim OR an orphan adoption both consume a slot). This
@@ -817,7 +828,7 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 
 	const originalMessageId = parsedEmail.messageId ? extractMsgId(parsedEmail.messageId) : null;
 
-	await stub.createEmail(Folders.INBOX, {
+	const created = await stub.createEmail(Folders.INBOX, {
 		id: messageId, subject: parsedEmail.subject || "",
 		sender: (parsedEmail.from?.address || "").toLowerCase(), recipient: allRecipients.join(", "),
 		cc: ccRecipients.join(", ") || null, bcc: bccRecipients.join(", ") || null,
@@ -826,6 +837,21 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 		in_reply_to: inReplyTo, email_references: emailReferences.length > 0 ? JSON.stringify(emailReferences) : null,
 		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
 	}, attachmentData);
+	const storedId = created.id;
+
+	// Wake the owner Agent Inbox. Duplicate SMTP deliveries reuse the same
+	// RFC Message-ID → same externalEventId, so Core de-dupes. Failures must
+	// not bounce the mail. Delivery is gated by AGENT_INBOX_NOTIFY_ENABLED.
+	ctx.waitUntil(runInboundNotify(env, {
+		mailbox: deliveryAddress,
+		emailId: storedId,
+		from: (parsedEmail.from?.address || "").toLowerCase(),
+		subject: parsedEmail.subject || "",
+		rfcMessageId: originalMessageId,
+	}).then((r) => {
+		if (r.closedError) console.log(`inbox notify: ${r.closedError}`);
+		else if (r.skipped && r.skipped !== "disabled") console.log(`inbox notify skipped: ${r.skipped}`);
+	}).catch((e) => console.error("inbox notify failed:", (e as Error).message)));
 
 	// Built-in AI auto-draft is OPT-IN and OFF by default. Firing it on every
 	// inbound email would (a) run Workers AI ~3-4× per message = a real cost driver,
@@ -834,11 +860,11 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 	// `autoDraft`. Direction is MCP-forward — a user's own agent manages the mail —
 	// over a built-in model.
 	const mboxSettings = await readMailboxSettings<{ autoDraft?: { enabled?: boolean } }>(env, deliveryAddress);
-	if (mboxSettings?.autoDraft?.enabled === true) {
+	if (created.created && mboxSettings?.autoDraft?.enabled === true) {
 		const agentStub = emailAgentStub(env, deliveryAddress);
 		ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
 			method: "POST", headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ mailboxId: deliveryAddress, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
+			body: JSON.stringify({ mailboxId: deliveryAddress, emailId: storedId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
 		})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
 	}
 }

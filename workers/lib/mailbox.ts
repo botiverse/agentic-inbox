@@ -12,6 +12,7 @@ import type { MailboxDO } from "../durableObject";
 import type { Env } from "../types";
 import { mailboxAccessAllowed } from "./auth";
 import { mailboxOf, mailboxKey, mailboxStub } from "./mailboxRef";
+import type { InboxNotifyRouting } from "./inboxNotify";
 
 export type MailboxContext = {
 	Bindings: Env;
@@ -27,6 +28,8 @@ export type MailboxContext = {
 		// The caller's raft handle (userinfo preferred_username), set from the
 		// session by the OAuth middleware. Used for claim namespace enforcement.
 		authHandle?: string;
+		// Login-time routing cache for Agent Inbox notify (slug + handle). Not an identity key.
+		authNotifyRouting?: InboxNotifyRouting | null;
 	};
 };
 

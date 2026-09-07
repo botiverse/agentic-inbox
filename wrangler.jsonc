@@ -39,6 +39,9 @@
 		"RAFT_OAUTH_CLIENT_KEY": "agentic-inbox",
 		"RAFT_API_ORIGIN": "https://api.raft.build",
 		"RAFT_APP_ORIGIN": "https://app.raft.build",
+		// Inbound email → owner Agent Inbox. "true" enables POST /api/oauth/agent-events.
+		// Merge ≠ enable: leave false until a reviewed deploy turns it on.
+		"AGENT_INBOX_NOTIFY_ENABLED": "false",
 		"EMAIL_ADDRESSES": [
 			"gogo@mail.build",
 			"mobile-qa@mail.build",

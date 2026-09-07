@@ -23,6 +23,8 @@ export interface RaftPrincipal {
 	clientId: string;
 	preferredUsername: string | null;
 	name: string | null;
+	/** Display/routing slug from userinfo. Not an identity key. */
+	serverSlug: string | null;
 }
 
 export interface SessionPayload {
