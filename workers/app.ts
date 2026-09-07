@@ -246,7 +246,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "list-mailboxes",
-					description: "List the mailboxes you own.",
+					description: "List the mailboxes you own. Each row is {id, email, name, inboxNotify}. `inboxNotify` is the Agent Inbox routing cache, or null if inbound mail to that mailbox will not wake you (human-owned, never logged in as an agent, or not yet stamped). A list also stamps missing routing from this session so a dormant mailbox starts waking without a separate re-claim.",
 					endpoint: { method: "GET", path: "/api/v1/mailboxes" },
 				},
 				{

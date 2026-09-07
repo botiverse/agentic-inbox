@@ -10,6 +10,9 @@ import {
 	externalEventId,
 	notifySummary,
 	notifyPayload,
+	settingsWithNotify,
+	publicInboxNotify,
+	applySettingsUpdate,
 	type InboxNotifyRouting,
 } from "./inboxNotify";
 
@@ -89,6 +92,53 @@ describe("routingFromPrincipal", () => {
 		expect(routingFromPrincipal({
 			type: "human", sub: "h1", serverId: botiverseId, serverSlug: null, preferredUsername: "artin",
 		})).toBeNull();
+	});
+});
+
+describe("settingsWithNotify", () => {
+	const owner = "raft:s1:agent:abc";
+	it("stamps routing onto a mailbox that has none", () => {
+		const { settings, wrote } = settingsWithNotify({ owner, fromName: "Gogo" }, routing, owner);
+		expect(wrote).toBe(true);
+		expect(settings.inboxNotify).toEqual(routing);
+		expect(settings.fromName).toBe("Gogo");
+	});
+	it("does not write when routing is already equal", () => {
+		const { wrote } = settingsWithNotify({ owner, inboxNotify: routing }, routing, owner);
+		expect(wrote).toBe(false);
+	});
+	it("does not stamp without routing (fail closed, same as missing_routing)", () => {
+		expect(settingsWithNotify({ owner }, null, owner)).toEqual({
+			settings: { owner }, wrote: false,
+		});
+	});
+	it("does not copy routing onto someone else's mailbox", () => {
+		const { wrote, settings } = settingsWithNotify(
+			{ owner: "raft:s1:agent:other" }, routing, owner,
+		);
+		expect(wrote).toBe(false);
+		expect(settings.inboxNotify).toBeUndefined();
+	});
+});
+
+describe("publicInboxNotify", () => {
+	it("returns the routing or null — never a partial object", () => {
+		expect(publicInboxNotify({ inboxNotify: routing })).toEqual(routing);
+		expect(publicInboxNotify({ inboxNotify: { serverId: "s1" } as InboxNotifyRouting })).toBeNull();
+		expect(publicInboxNotify({})).toBeNull();
+		expect(publicInboxNotify(null)).toBeNull();
+	});
+});
+
+describe("applySettingsUpdate", () => {
+	it("lets the caller change fromName but not owner or inboxNotify", () => {
+		const existing = { owner: "raft:s1:agent:abc", fromName: "Old", inboxNotify: routing };
+		const next = applySettingsUpdate(existing, {
+			fromName: "New", owner: "raft:s1:agent:evil", inboxNotify: { ...routing, agentName: "Evil" },
+		});
+		expect(next.fromName).toBe("New");
+		expect(next.owner).toBe("raft:s1:agent:abc");
+		expect(next.inboxNotify).toEqual(routing);
 	});
 });
 

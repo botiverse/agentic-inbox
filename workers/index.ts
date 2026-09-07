@@ -20,6 +20,7 @@ import {
 	publicFromTo,
 	toApiEmail,
 } from "./lib/email-helpers";
+import { settingsWithNotify, publicInboxNotify, applySettingsUpdate } from "./lib/inboxNotify";
 import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
 import { runInboundNotify } from "./lib/agentEvents";
 import { SendEmailRequestSchema } from "./lib/schemas";
@@ -166,7 +167,15 @@ app.get("/api/v1/mailboxes", async (c) => {
 		// just-claimed mailbox shows immediately — dogfood: Box).
 		const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
 		const owned = await ownerStub.list(owner);
-		return c.json(owned.map(({ email, name }) => ({ id: email, email, name })));
+		const routing = c.get("authNotifyRouting");
+		const rows = await Promise.all(owned.map(async ({ email, name }) => {
+			const obj = await c.env.BUCKET.get(mailboxKey(email));
+			const raw = obj ? (await obj.json().catch(() => ({}))) as Record<string, unknown> : {};
+			const { settings, wrote } = settingsWithNotify(raw, routing, owner);
+			if (wrote) await c.env.BUCKET.put(mailboxKey(email), JSON.stringify(settings));
+			return { id: email, email, name, inboxNotify: publicInboxNotify(settings) };
+		}));
+		return c.json(rows);
 	}
 	const allMailboxes = await listMailboxes(c.env.BUCKET);
 	return c.json(allMailboxes.map((m) => ({ ...m, name: m.id })));
@@ -264,13 +273,12 @@ app.post("/api/v1/mailboxes", async (c) => {
 		if (action === "idempotent") {
 			// Already yours — no new key minted. Refresh notify routing from this
 			// login so older mailboxes pick up slug+handle without a re-create.
-			const notifyRouting = c.get("authNotifyRouting");
-			if (notifyRouting && JSON.stringify(existingSettings.inboxNotify) !== JSON.stringify(notifyRouting)) {
-				const updated = { ...existingSettings, inboxNotify: notifyRouting };
-				await c.env.BUCKET.put(key, JSON.stringify(updated));
-				return c.json({ id: email, email, name: existingSettings.fromName || name, owner, settings: updated }, 200);
-			}
-			return c.json({ id: email, email, name: existingSettings.fromName || name, owner, settings: existingSettings }, 200);
+			const { settings: updated, wrote } = settingsWithNotify(
+				existingSettings, c.get("authNotifyRouting"), owner,
+			);
+			if (wrote) await c.env.BUCKET.put(key, JSON.stringify(updated));
+			const shown = wrote ? updated : existingSettings;
+			return c.json({ id: email, email, name: existingSettings.fromName || name, owner, settings: shown, inboxNotify: publicInboxNotify(shown) }, 200);
 		}
 		if (action === "taken") {
 			return c.json({ error: "Mailbox already exists and is owned by another account", code: "MAILBOX_TAKEN" }, 409);
@@ -335,16 +343,23 @@ app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
 	const mailboxId = mailboxOf(c.req.param("mailboxId")!);
 	const obj = await c.env.BUCKET.get(mailboxKey(mailboxId));
 	if (!obj) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
-	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings: await obj.json() });
+	const settings = (await obj.json()) as Record<string, unknown>;
+	return c.json({
+		id: mailboxId, name: mailboxId, email: mailboxId, settings,
+		inboxNotify: publicInboxNotify(settings),
+	});
 });
 
 app.put("/api/v1/mailboxes/:mailboxId", async (c) => {
 	const mailboxId = mailboxOf(c.req.param("mailboxId")!);
 	const { settings } = (await c.req.json()) as { settings: Record<string, unknown> };
 	const key = mailboxKey(mailboxId);
-	if (!(await c.env.BUCKET.head(key))) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
-	await c.env.BUCKET.put(key, JSON.stringify(settings));
-	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings });
+	const existingObj = await c.env.BUCKET.get(key);
+	if (!existingObj) return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
+	const existing = (await existingObj.json()) as Record<string, unknown>;
+	const next = applySettingsUpdate(existing, settings || {});
+	await c.env.BUCKET.put(key, JSON.stringify(next));
+	return c.json({ id: mailboxId, name: mailboxId, email: mailboxId, settings: next, inboxNotify: publicInboxNotify(next) });
 });
 
 app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
