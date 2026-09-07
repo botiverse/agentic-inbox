@@ -12,7 +12,7 @@ import type { MailboxDO } from "../durableObject";
 import type { Env } from "../types";
 import { mailboxAccessAllowed } from "./auth";
 import { mailboxOf, mailboxKey, mailboxStub } from "./mailboxRef";
-import type { InboxNotifyRouting } from "./inboxNotify";
+import { settingsWithNotify, type InboxNotifyRouting } from "./inboxNotify";
 
 export type MailboxContext = {
 	Bindings: Env;
@@ -47,11 +47,11 @@ export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) =
 		return c.json({ error: "Not found", code: "NOT_FOUND" }, 404);
 	}
 
+	const settings = (await obj.json().catch(() => ({}))) as { owner?: string; inboxNotify?: unknown };
 	// Owner-scoped access: enforce for scoped-key callers. Legacy callers (CF
 	// Access human session with no scope) pass through during the transition.
 	const authScope = c.get("authScope");
 	if (authScope) {
-		const settings = (await obj.json().catch(() => ({}))) as { owner?: string };
 		const allowed = mailboxAccessAllowed(
 			{ owner: c.get("authOwner") ?? "", scope: authScope },
 			{ id: mailboxId, owner: settings.owner ?? null },
@@ -67,6 +67,15 @@ export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) =
 			return c.json({ error: "Forbidden: this key is not scoped to this mailbox", code: "FORBIDDEN" }, 403);
 		}
 	}
+
+	// Heal missing notify routing on any authenticated use of this mailbox, so
+	// dormant boxes don't need a dedicated re-claim (Gogo/artin 2026-09-07).
+	const { settings: stamped, wrote } = settingsWithNotify(
+		settings,
+		c.get("authNotifyRouting"),
+		c.get("authOwner"),
+	);
+	if (wrote) await c.env.BUCKET.put(mailboxKey(mailboxId), JSON.stringify(stamped));
 
 	// Instantiate DO stub (same resolution rule — never the raw path param).
 	c.set("mailboxStub", mailboxStub(c.env, mailboxId));

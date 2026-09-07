@@ -21,6 +21,12 @@ export interface Mailbox {
 	email: string;
 	name: string;
 	settings?: MailboxSettings;
+	inboxNotify?: {
+		serverId: string;
+		serverSlug: string;
+		agentId: string;
+		agentName: string;
+	} | null;
 }
 
 export interface Email {

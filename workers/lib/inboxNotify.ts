@@ -80,6 +80,53 @@ export function routingFromPrincipal(p: {
 	return { serverId: p.serverId, serverSlug, agentId: p.sub, agentName };
 }
 
+export type MailboxSettingsRow = Record<string, unknown> & {
+	owner?: string;
+	fromName?: string;
+	inboxNotify?: unknown;
+};
+
+/**
+ * Stamp login-time routing onto mailbox settings when the caller owns it.
+ * No-op if routing is missing or already equal (avoid a write on every request).
+ * Never copies routing onto a mailbox owned by someone else.
+ */
+export function settingsWithNotify(
+	settings: MailboxSettingsRow,
+	routing: InboxNotifyRouting | null | undefined,
+	callerOwner?: string | null,
+): { settings: MailboxSettingsRow; wrote: boolean } {
+	if (!routing) return { settings, wrote: false };
+	if (callerOwner && settings.owner && settings.owner !== callerOwner) {
+		return { settings, wrote: false };
+	}
+	if (JSON.stringify(settings.inboxNotify ?? null) === JSON.stringify(routing)) {
+		return { settings, wrote: false };
+	}
+	return { settings: { ...settings, inboxNotify: routing }, wrote: true };
+}
+
+/** Public list/get field: the routing cache, or null if this mailbox will not wake. */
+export function publicInboxNotify(settings: MailboxSettingsRow | null | undefined): InboxNotifyRouting | null {
+	const r = settings?.inboxNotify as Record<string, unknown> | null | undefined;
+	if (!r || typeof r !== "object") return null;
+	const serverId = typeof r.serverId === "string" ? r.serverId.trim() : "";
+	const serverSlug = typeof r.serverSlug === "string" ? r.serverSlug.trim() : "";
+	const agentId = typeof r.agentId === "string" ? r.agentId.trim() : "";
+	const agentName = typeof r.agentName === "string" ? r.agentName.trim() : "";
+	if (!serverId || !serverSlug || !agentId || !agentName) return null;
+	return { serverId, serverSlug, agentId, agentName };
+}
+
+/** PUT must not let the caller overwrite owner or inboxNotify. */
+export function applySettingsUpdate(
+	existing: MailboxSettingsRow,
+	incoming: Record<string, unknown>,
+): MailboxSettingsRow {
+	const { inboxNotify: _n, owner: _o, ...rest } = incoming;
+	return { ...existing, ...rest, owner: existing.owner, inboxNotify: existing.inboxNotify };
+}
+
 export function decideNotify(input: {
 	owner: string | null | undefined;
 	/** Explicit false is sticky mute. Undefined/true = notify. */
