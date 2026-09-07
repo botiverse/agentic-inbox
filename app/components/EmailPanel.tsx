@@ -11,7 +11,7 @@ import EmailPanelHeader from "~/components/email-panel/EmailPanelHeader";
 import EmailPanelToolbar from "~/components/email-panel/EmailPanelToolbar";
 import SingleMessageView from "~/components/email-panel/SingleMessageView";
 import ThreadMessage from "~/components/email-panel/ThreadMessage";
-import { splitEmailList, toEmailListValue } from "~/lib/utils";
+import { displayFromTo, splitEmailList, toEmailListValue } from "~/lib/utils";
 import api from "~/services/api";
 import { useDeleteEmail, useEmail, useMoveEmail, useReplyToEmail, useSendEmail, useThreadReplies, useUpdateEmail } from "~/queries/emails";
 import { useFolders } from "~/queries/folders";
@@ -77,7 +77,7 @@ export default function EmailPanel({ emailId }: { emailId: string }) {
 
 	const lastReceivedMessage = useMemo(() => {
 		const ce = currentMailbox?.email;
-		const received = allMessages.filter((msg) => !draftMessageIds.has(msg.id) && msg.from !== ce);
+		const received = allMessages.filter((msg) => !draftMessageIds.has(msg.id) && displayFromTo(msg).from !== ce);
 		if (received.length > 0) return received[0];
 		const nonDrafts = allMessages.filter((msg) => !draftMessageIds.has(msg.id));
 		return nonDrafts.length > 0 ? nonDrafts[0] : email;

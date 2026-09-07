@@ -20,6 +20,23 @@
  * fall through to the normal "no such mailbox" path rather than silently
  * resolving somewhere unintended.
  */
+/**
+ * Header from/to for display. Prefer the public API fields; fall back to
+ * storage aliases so a thread payload with only sender/recipient cannot
+ * blank the message header after first paint.
+ */
+export function displayFromTo(email: {
+	from?: string | null;
+	to?: string | null;
+	sender?: string | null;
+	recipient?: string | null;
+}): { from: string; to: string } {
+	return {
+		from: (email.from || email.sender || "").trim(),
+		to: (email.to || email.recipient || "").trim(),
+	};
+}
+
 export function deliveryMailbox(address: string): string {
 	const at = address.lastIndexOf("@");
 	if (at < 1) return address;

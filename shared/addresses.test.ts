@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deliveryMailbox, sameMailbox, receivedAtAddress } from "./addresses";
+import { deliveryMailbox, sameMailbox, receivedAtAddress, displayFromTo } from "./addresses";
 
 describe("sameMailbox (one identity rule for delivery + compose — AX: artin)", () => {
 	it("treats a +tag sub-address as the same mailbox", () => {
@@ -21,6 +21,28 @@ describe("sameMailbox (one identity rule for delivery + compose — AX: artin)",
 	it("is false for empty input rather than matching everything", () => {
 		expect(sameMailbox("", "artin@mail.build")).toBe(false);
 		expect(sameMailbox("artin@mail.build", "")).toBe(false);
+	});
+});
+
+describe("displayFromTo (thread row must not blank the header)", () => {
+	it("prefers public from/to", () => {
+		expect(displayFromTo({
+			from: "postel@mail.build",
+			to: "artin@mail.build",
+			sender: "ignored@x",
+			recipient: "ignored@y",
+		})).toEqual({ from: "postel@mail.build", to: "artin@mail.build" });
+	});
+	it("falls back to sender/recipient when from/to are missing — the live clobber", () => {
+		expect(displayFromTo({
+			sender: "gogo@mail.build",
+			recipient: "artin@mail.build",
+		})).toEqual({ from: "gogo@mail.build", to: "artin@mail.build" });
+		expect(displayFromTo({ from: "", to: "", sender: "a@x", recipient: "b@y" }))
+			.toEqual({ from: "a@x", to: "b@y" });
+	});
+	it("does not invent addresses", () => {
+		expect(displayFromTo({})).toEqual({ from: "", to: "" });
 	});
 });
 
