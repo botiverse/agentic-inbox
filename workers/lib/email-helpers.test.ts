@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet, snippetFromFullBody, deliveryMailbox } from "./email-helpers";
+import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet, snippetFromFullBody, deliveryMailbox, publicFromTo } from "./email-helpers";
 import { validateSender, SenderValidationError } from "./email-helpers";
 
 describe("getFullEmail body_html is raw (XSS guard — dogfood: Duoyu)", () => {
@@ -99,6 +99,16 @@ describe("unsupportedSendFields (strict fields + tolerant path-echo — dogfood:
 		const out = unsupportedSendFields({ mailboxId: "other@mail.build", to: "a@mail.build", in_reply_to: "x" }, box);
 		expect(out).toContain("mailboxId");
 		expect(out).toContain("in_reply_to");
+	});
+});
+
+describe("publicFromTo never returns undefined (UI avatars call charAt)", () => {
+	it("aliases sender/recipient", () => {
+		expect(publicFromTo({ sender: "a@x", recipient: "b@y" })).toEqual({ from: "a@x", to: "b@y" });
+	});
+	it("turns null/missing into empty string", () => {
+		expect(publicFromTo({ sender: null, recipient: undefined })).toEqual({ from: "", to: "" });
+		expect(publicFromTo({})).toEqual({ from: "", to: "" });
 	});
 });
 

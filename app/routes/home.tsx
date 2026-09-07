@@ -17,6 +17,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link as RouterLink } from "react-router";
 import api, { type KeyGuidance } from "~/services/api";
+import { avatarInitial } from "~/lib/utils";
 import {
 	useCreateMailbox,
 	useDeleteMailbox,
@@ -163,7 +164,7 @@ export default function HomeRoute() {
 								}`}
 							>
 								<div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-kumo-fill text-sm font-bold text-kumo-default">
-									{account.name.charAt(0).toUpperCase()}
+									{avatarInitial(account.name || account.email)}
 								</div>
 								<div className="min-w-0 flex-1">
 									<div className="text-sm font-medium text-kumo-default truncate">

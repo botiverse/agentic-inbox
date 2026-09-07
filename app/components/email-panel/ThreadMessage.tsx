@@ -14,6 +14,7 @@ import {
 import EmailAttachmentList from "~/components/EmailAttachmentList";
 import EmailIframe from "~/components/EmailIframe";
 import {
+	avatarInitial,
 	formatDetailDate,
 	formatShortDate,
 	rewriteInlineImages,
@@ -48,7 +49,7 @@ function Avatar({ isDraft, isSelf, sender }: { isDraft?: boolean; isSelf: boolea
 						: "bg-kumo-fill text-kumo-default"
 			}`}
 		>
-			{isDraft ? "D" : sender.charAt(0).toUpperCase()}
+			{isDraft ? "D" : avatarInitial(sender)}
 		</div>
 	);
 }

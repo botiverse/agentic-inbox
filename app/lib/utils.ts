@@ -36,6 +36,12 @@ export function formatBytes(bytes: number, decimals = 1): string {
 /**
  * Split a comma-separated email field into individual addresses.
  */
+/** First letter for avatars. Missing/empty from must not crash render. */
+export function avatarInitial(value?: string | null): string {
+	const s = (value || "").trim();
+	return s ? s.charAt(0).toUpperCase() : "?";
+}
+
 export function splitEmailList(value?: string | null): string[] {
 	return (value || "")
 		.split(",")
