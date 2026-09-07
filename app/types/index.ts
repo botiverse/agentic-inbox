@@ -34,6 +34,9 @@ export interface Email {
 	// grep-able); the raw `body` field is gone (redundant). (AX: Yingjun.)
 	from: string;
 	to: string;
+	/** Storage aliases. Thread GET used to leak these without from/to. */
+	sender?: string;
+	recipient?: string;
 	cc?: string;
 	bcc?: string;
 	date: string;

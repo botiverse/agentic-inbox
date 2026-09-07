@@ -3,9 +3,24 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { displayFromTo } from "~/lib/utils";
 import api from "~/services/api";
 import type { Email } from "~/types";
 import { queryKeys } from "./keys";
+
+/** Merge a thread row into a get-email cache entry without dropping from/to. */
+export function mergeThreadIntoDetail(old: Email | undefined, incoming: Email): Email {
+	const addrs = displayFromTo({ ...old, ...incoming });
+	return {
+		...old,
+		...incoming,
+		from: addrs.from,
+		to: addrs.to,
+		body_html: incoming.body_html ?? old?.body_html ?? null,
+		body_text: incoming.body_text ?? old?.body_text,
+		raw_headers: incoming.raw_headers ?? old?.raw_headers,
+	};
+}
 
 // ---------- Types ----------
 
@@ -77,15 +92,15 @@ export function useThreadReplies(
 			const emails = await api.getThread(mailboxId!, threadId!, { signal }) as Email[];
 
 			// Populate individual email detail caches so clicking a thread
-			// message in the panel doesn't re-fetch.
+			// message in the panel doesn't re-fetch. Merge — never replace a
+			// get-email row (from/to + body_html + raw_headers) with a raw
+			// thread row that only has sender/recipient.
 			for (const email of emails) {
-				qc.setQueryData(
-					queryKeys.emails.detail(mailboxId!, email.id),
-					email,
-				);
+				const key = queryKeys.emails.detail(mailboxId!, email.id);
+				qc.setQueryData(key, (old: Email | undefined) => mergeThreadIntoDetail(old, email));
 			}
 
-			return emails;
+			return emails.map((e) => ({ ...e, ...displayFromTo(e) }));
 		},
 		enabled: !!mailboxId && !!threadId,
 	});

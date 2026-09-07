@@ -18,6 +18,7 @@ import {
 	unsupportedSendFields,
 	cleanSnippet,
 	publicFromTo,
+	toApiEmail,
 } from "./lib/email-helpers";
 import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
 import { runInboundNotify } from "./lib/agentEvents";
@@ -676,7 +677,8 @@ app.post("/api/v1/mailboxes/:mailboxId/emails/:id/move", async (c: AppContext) =
 // -- Threads --------------------------------------------------------
 
 app.get("/api/v1/mailboxes/:mailboxId/threads/:threadId", async (c: AppContext) => {
-	return c.json(await (c.var.mailboxStub as any).getThreadEmails(c.req.param("threadId")!));
+	const emails = await (c.var.mailboxStub as any).getThreadEmails(c.req.param("threadId")!);
+	return c.json((emails as Array<{ sender?: string | null; recipient?: string | null; body?: string | null }>).map(toApiEmail));
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/threads/:threadId/read", async (c: AppContext) => {

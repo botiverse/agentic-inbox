@@ -15,6 +15,7 @@ import EmailAttachmentList from "~/components/EmailAttachmentList";
 import EmailIframe from "~/components/EmailIframe";
 import {
 	avatarInitial,
+	displayFromTo,
 	formatDetailDate,
 	formatShortDate,
 	rewriteInlineImages,
@@ -69,9 +70,10 @@ export default function ThreadMessage({
 	onViewSource,
 	onPreviewImage,
 }: ThreadMessageProps) {
-	const isSelf = email.from === mailboxEmail;
+	const { from, to } = displayFromTo(email);
+	const isSelf = from === mailboxEmail;
 	const containerClassName = `${!isLast ? "border-b border-kumo-line" : ""} ${isDraft ? "border-l-2 border-l-kumo-warning bg-kumo-warning/[0.02]" : ""}`;
-	const senderLabel = isDraft ? "Draft reply" : isSelf ? "You" : email.from;
+	const senderLabel = isDraft ? "Draft reply" : isSelf ? "You" : from;
 
 	if (!isExpanded) {
 		return (
@@ -81,7 +83,7 @@ export default function ThreadMessage({
 					onClick={onToggleExpand}
 					className="w-full flex items-center gap-3 px-4 py-3 hover:bg-kumo-tint rounded-lg text-left"
 				>
-					<Avatar isDraft={isDraft} isSelf={isSelf} sender={email.from} />
+					<Avatar isDraft={isDraft} isSelf={isSelf} sender={from} />
 					<div className="flex-1 min-w-0">
 						<div className="flex items-center justify-between">
 							<span className="text-sm font-medium text-kumo-default truncate">
@@ -113,7 +115,7 @@ export default function ThreadMessage({
 							aria-label="Collapse message"
 						>
 							<div className="cursor-pointer hover:ring-2 hover:ring-kumo-brand/30 transition-shadow rounded-full">
-								<Avatar isDraft={isDraft} isSelf={isSelf} sender={email.from} />
+								<Avatar isDraft={isDraft} isSelf={isSelf} sender={from} />
 							</div>
 						</button>
 						<div className="min-w-0">
@@ -123,7 +125,7 @@ export default function ThreadMessage({
 								</span>
 								{isDraft && <Badge variant="outline">Draft</Badge>}
 							</div>
-							<div className="text-xs text-kumo-subtle">To: {email.to}</div>
+							<div className="text-xs text-kumo-subtle">To: {to}</div>
 						</div>
 					</div>
 					<div className="flex items-center gap-1 shrink-0">

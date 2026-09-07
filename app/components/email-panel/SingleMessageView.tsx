@@ -4,7 +4,7 @@
 
 import EmailAttachmentList from "~/components/EmailAttachmentList";
 import EmailIframe from "~/components/EmailIframe";
-import { avatarInitial, formatDetailDate, rewriteInlineImages, emailBodyHtml } from "~/lib/utils";
+import { avatarInitial, displayFromTo, formatDetailDate, rewriteInlineImages, emailBodyHtml } from "~/lib/utils";
 import type { Email } from "~/types";
 
 interface SingleMessageViewProps {
@@ -18,19 +18,20 @@ export default function SingleMessageView({
 	mailboxId,
 	onPreviewImage,
 }: SingleMessageViewProps) {
+	const { from, to } = displayFromTo(email);
 	return (
 		<div className="flex flex-col h-full">
 			<div className="px-4 py-4 border-b border-kumo-line md:px-6">
 				<div className="flex items-center justify-between gap-3">
 					<div className="flex items-center gap-2.5 min-w-0">
 						<div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-kumo-fill text-xs font-bold text-kumo-default">
-							{avatarInitial(email.from)}
+							{avatarInitial(from)}
 						</div>
 						<div className="min-w-0">
 							<div className="text-sm font-medium text-kumo-default truncate">
-								{email.from}
+								{from}
 							</div>
-							<div className="text-xs text-kumo-subtle">To: {email.to}</div>
+							<div className="text-xs text-kumo-subtle">To: {to}</div>
 						</div>
 					</div>
 					<span className="text-xs text-kumo-subtle shrink-0">

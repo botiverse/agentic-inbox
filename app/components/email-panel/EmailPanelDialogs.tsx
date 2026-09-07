@@ -3,7 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { Button, Dialog } from "@cloudflare/kumo";
-import { downloadFile } from "~/lib/utils";
+import { displayFromTo, downloadFile } from "~/lib/utils";
 import type { Email } from "~/types";
 
 interface PreviewImage {
@@ -40,8 +40,9 @@ function getSourceHeaders(msg: Email): { key: string; value: string }[] {
 	}
 
 	const headers: { key: string; value: string }[] = [];
-	if (msg.from) headers.push({ key: "From", value: msg.from });
-	if (msg.to) headers.push({ key: "To", value: msg.to });
+	const { from, to } = displayFromTo(msg);
+	if (from) headers.push({ key: "From", value: from });
+	if (to) headers.push({ key: "To", value: to });
 	if (msg.cc) headers.push({ key: "Cc", value: msg.cc });
 	if (msg.bcc) headers.push({ key: "Bcc", value: msg.bcc });
 	if (msg.subject) headers.push({ key: "Subject", value: msg.subject });

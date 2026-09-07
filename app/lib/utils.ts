@@ -42,6 +42,8 @@ export function avatarInitial(value?: string | null): string {
 	return s ? s.charAt(0).toUpperCase() : "?";
 }
 
+export { displayFromTo } from "shared/addresses";
+
 export function splitEmailList(value?: string | null): string[] {
 	return (value || "")
 		.split(",")

@@ -360,6 +360,30 @@ export function publicFromTo(row: { sender?: string | null; recipient?: string |
 	return { from: row.sender ?? "", to: row.recipient ?? "" };
 }
 
+/**
+ * Public email shape for get-email / get-thread. Storage keeps sender/recipient/body;
+ * the API and UI read from/to + body_html/body_text. Thread GET used to return the
+ * raw DO row, and the UI then overwrote the already-correct get-email cache with it
+ * (from/to vanished after first paint — artin 2026-09-07).
+ */
+export function toApiEmail<T extends {
+	sender?: string | null;
+	recipient?: string | null;
+	body?: string | null;
+	snippet?: string | null;
+}>(email: T): Omit<T, "body"> & { from: string; to: string; body_text: string; body_html: string | null; snippet: string } {
+	const textBody = email.body ? stripHtmlToText(email.body) : "";
+	const bodyHtml = email.body && looksLikeHtml(email.body) ? email.body : null;
+	const { body: _body, ...rest } = email;
+	return {
+		...(rest as Omit<T, "body">),
+		...publicFromTo(email),
+		body_text: textBody,
+		body_html: bodyHtml,
+		snippet: typeof email.snippet === "string" && email.snippet.length > 0 ? email.snippet : textBody.slice(0, 300),
+	};
+}
+
 export function cleanSnippet(raw: string | null | undefined, maxLen = 300): string {
 	if (!raw) return "";
 	return stripHtmlToText(raw.replace(/<[^>]*$/, "")).slice(0, maxLen);

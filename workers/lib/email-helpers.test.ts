@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet, snippetFromFullBody, deliveryMailbox, publicFromTo } from "./email-helpers";
+import { looksLikeHtml, stripHtmlToText, decodeHtmlEntities, getFullEmail, unsupportedSendFields, cleanSnippet, snippetFromFullBody, deliveryMailbox, publicFromTo, toApiEmail } from "./email-helpers";
 import { validateSender, SenderValidationError } from "./email-helpers";
 
 describe("getFullEmail body_html is raw (XSS guard — dogfood: Duoyu)", () => {
@@ -109,6 +109,29 @@ describe("publicFromTo never returns undefined (UI avatars call charAt)", () => 
 	it("turns null/missing into empty string", () => {
 		expect(publicFromTo({ sender: null, recipient: undefined })).toEqual({ from: "", to: "" });
 		expect(publicFromTo({})).toEqual({ from: "", to: "" });
+	});
+});
+
+describe("toApiEmail (thread GET must match get-email from/to)", () => {
+	it("fills from/to from a raw DO thread row that only has sender/recipient", () => {
+		const api = toApiEmail({
+			id: "7c1e691f",
+			sender: "postel@mail.build",
+			recipient: "artin@mail.build",
+			body: "<p>hello</p>",
+			read: 1,
+			starred: 0,
+		});
+		expect(api.from).toBe("postel@mail.build");
+		expect(api.to).toBe("artin@mail.build");
+		expect(api.body_html).toBe("<p>hello</p>");
+		expect(api.body_text).toBe("hello");
+		expect("body" in api).toBe(false);
+	});
+	it("goes red if someone returns the raw row without mapping", () => {
+		const raw = { sender: "postel@mail.build", recipient: "artin@mail.build", body: "hi" };
+		expect((raw as { from?: string }).from).toBeUndefined();
+		expect(toApiEmail(raw).from).toBe("postel@mail.build");
 	});
 });
 
