@@ -52,11 +52,12 @@ describe("POST /api/v1/mailboxes — body validation", () => {
 // mailbox lookup → reject-or-deliver) with a fake message + env, because the
 // setReject wiring is precisely the kind of thing that silently regresses.
 
-function rawEmail(to: string): { stream: ReadableStream; size: number } {
+function rawEmail(to: string, extraHeaders: string[] = []): { stream: ReadableStream; size: number } {
 	const text = [
 		"From: sender@example.com",
 		`To: ${to}`,
 		"Subject: hello",
+		...extraHeaders,
 		"",
 		"body text",
 		"",
@@ -73,8 +74,10 @@ function rawEmail(to: string): { stream: ReadableStream; size: number } {
 function envWithMailboxes(existing: string[]) {
 	const heads: string[] = [];
 	const doNames: string[] = [];
-	const stored: Array<{ recipient?: string }> = [];
+	const stored: Array<{ recipient?: string; message_id?: string | null; id?: string }> = [];
 	const sent: unknown[] = [];
+	const waited: Promise<unknown>[] = [];
+	const seenMsg = new Map<string, string>();
 	const env = {
 		// Production's `env.EMAIL` binding is UNRESTRICTED (it can mail any address —
 		// it has to, for replies/forwards). So nothing at the platform layer stops a
@@ -93,21 +96,30 @@ function envWithMailboxes(existing: string[]) {
 		MAILBOX: {
 			idFromName: (n: string) => { doNames.push(n); return n; },
 			get: () => ({
-				createEmail: async (_folder: string, row: { recipient?: string }) => { stored.push(row); },
+				createEmail: async (_folder: string, row: { recipient?: string; message_id?: string | null; id?: string }) => {
+					if (row.message_id && seenMsg.has(row.message_id)) {
+						return { created: false, id: seenMsg.get(row.message_id)! };
+					}
+					const id = row.id || crypto.randomUUID();
+					if (row.message_id) seenMsg.set(row.message_id, id);
+					stored.push({ ...row, id });
+					return { created: true, id };
+				},
 				findThreadBySubject: async () => null,
 			}),
 		},
 		EMAIL_AGENT: { idFromName: (n: string) => n, get: () => ({ fetch: async () => new Response("") }) },
 	} as never;
-	return { heads, doNames, stored, sent, env };
+	return { heads, doNames, stored, sent, waited, env };
 }
 
-async function deliver(to: string, existing: string[]) {
-	const { stream, size } = rawEmail(to);
+async function deliver(to: string, existing: string[], extraHeaders: string[] = []) {
+	const { stream, size } = rawEmail(to, extraHeaders);
 	const rejects: string[] = [];
-	const { heads, doNames, stored, sent, env } = envWithMailboxes(existing);
+	const { heads, doNames, stored, sent, waited, env } = envWithMailboxes(existing);
 	const event = { raw: stream, rawSize: size, setReject: (r: string) => rejects.push(r) };
-	await receiveEmail(event, env, { waitUntil() {} } as never);
+	await receiveEmail(event, env, { waitUntil(p: Promise<unknown>) { waited.push(p); } } as never);
+	await Promise.allSettled(waited);
 	return { rejects, heads, doNames, stored, sent };
 }
 
@@ -157,6 +169,13 @@ describe("inbound: unknown recipient is REJECTED in-session, never silently drop
 		const { rejects, sent } = await deliver("nobody@mail.build", []);
 		expect(rejects).toHaveLength(1);
 		expect(sent).toHaveLength(0);
+	});
+});
+
+describe("inbound: RFC Message-ID is stored and de-duped", () => {
+	it("keeps the RFC Message-ID on the stored row", async () => {
+		const { stored } = await deliver("artin@mail.build", ["artin@mail.build"], ["Message-ID: <abc@example.com>"]);
+		expect(stored[0].message_id).toBe("abc@example.com");
 	});
 });
 
@@ -218,7 +237,10 @@ describe("internal send resolves a +tag recipient to its base mailbox", () => {
 			MAILBOX: {
 				idFromName: (n: string) => { doNames.push(n); return n; },
 				get: () => ({
-					createEmail: async (_f: string, row: { recipient?: string }) => { stored.push(row); },
+					createEmail: async (_f: string, row: { recipient?: string; id?: string }) => {
+						stored.push(row);
+						return { created: true, id: row.id || "id" };
+					},
 					checkSendRateLimit: async () => null,
 				}),
 			},
@@ -276,7 +298,10 @@ describe("send routing: internal / allow-listed external / refused", () => {
 			MAILBOX: {
 				idFromName: (n: string) => n,
 				get: () => ({
-					createEmail: async (folder: string, row: Record<string, unknown>) => { stored.push({ folder, row }); },
+					createEmail: async (folder: string, row: Record<string, unknown>) => {
+						stored.push({ folder, row });
+						return { created: true, id: (row.id as string) || "id" };
+					},
 					checkSendRateLimit: async () => null,
 				}),
 			},
@@ -334,5 +359,64 @@ describe("send routing: internal / allow-listed external / refused", () => {
 		expect(res.status).toBe(502);
 		expect((await res.json() as { code: string }).code).toBe("SEND_FAILED");
 		expect(stored).toHaveLength(0); // and it is NOT filed as Sent
+	});
+});
+
+// Structural teeth: wake is bound to "landed in INBOX", not to one ingress.
+// Verified to go red: add a second `createEmail(Folders.INBOX` outside
+// deliverToInbox and this fails. (Gogo / artin 2026-09-07)
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+describe("INBOX writes only go through deliverToInbox", () => {
+	function walk(dir: string): string[] {
+		const out: string[] = [];
+		for (const ent of readdirSync(dir, { withFileTypes: true })) {
+			const p = join(dir, ent.name);
+			if (ent.isDirectory()) {
+				if (ent.name === "node_modules" || ent.name === "build") continue;
+				out.push(...walk(p));
+			} else if (ent.name.endsWith(".ts") && !ent.name.endsWith(".test.ts")) out.push(p);
+		}
+		return out;
+	}
+
+	it("has exactly one createEmail(Folders.INBOX) and it lives inside deliverToInbox", () => {
+		const files = walk(join(import.meta.dirname));
+		const hits: Array<{ file: string; line: number; inDeliver: boolean }> = [];
+		for (const file of files) {
+			const text = readFileSync(file, "utf8");
+			const fn = text.indexOf("async function deliverToInbox");
+			let bodyStart = -1;
+			let bodyEnd = -1;
+			if (fn >= 0) {
+				// Skip the parameter/return-type braces (`stub: { … }`, `Promise<{ … }>`).
+				const marker = "\n): Promise<{ created: boolean; id: string }> {";
+				const sigEnd = text.indexOf(marker, fn);
+				bodyStart = sigEnd >= 0 ? sigEnd + marker.length - 1 : -1;
+				let depth = 0;
+				for (let i = bodyStart; i >= 0 && i < text.length; i++) {
+					if (text[i] === "{") depth++;
+					else if (text[i] === "}") {
+						depth--;
+						if (depth === 0) {
+							bodyEnd = i;
+							break;
+						}
+					}
+				}
+			}
+			const re = /createEmail\(\s*Folders\.INBOX/g;
+			let m: RegExpExecArray | null;
+			while ((m = re.exec(text))) {
+				hits.push({
+					file,
+					line: text.slice(0, m.index).split("\n").length,
+					inDeliver: bodyStart >= 0 && m.index > bodyStart && m.index < bodyEnd,
+				});
+			}
+		}
+		expect(hits.filter((h) => !h.inDeliver), `INBOX writes outside deliverToInbox: ${JSON.stringify(hits)}`).toEqual([]);
+		expect(hits.filter((h) => h.inDeliver)).toHaveLength(1);
 	});
 });

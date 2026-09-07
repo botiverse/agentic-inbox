@@ -20,6 +20,7 @@ const principal: RaftPrincipal = {
 	clientId: "agentic-inbox",
 	preferredUsername: "Gogo",
 	name: "Gogo",
+	serverSlug: "botiverse",
 };
 
 function reqWithCookie(setCookie: string): Request {

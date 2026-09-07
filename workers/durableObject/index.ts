@@ -825,7 +825,7 @@ export class MailboxDO extends DurableObject<Env> {
 		folder: string,
 		email: EmailData,
 		attachments: AttachmentData[],
-	) {
+	): Promise<{ created: boolean; id: string }> {
 		// Resolve folder name or ID to the actual folder ID.
 		const folderRow = this.db
 			.select({ id: schema.folders.id })
@@ -843,6 +843,23 @@ export class MailboxDO extends DurableObject<Env> {
 
 		const folderId = folderRow.id;
 		const isSent = folderId === Folders.SENT;
+
+		// Inbound SMTP retries reuse the RFC Message-ID. Dedup on the inbox so a
+		// second delivery does not create a second row (and a second notify key).
+		if (folderId === Folders.INBOX && email.message_id) {
+			const existing = this.db
+				.select({ id: schema.emails.id })
+				.from(schema.emails)
+				.where(
+					and(
+						eq(schema.emails.message_id, email.message_id),
+						eq(schema.emails.folder_id, Folders.INBOX),
+					),
+				)
+				.limit(1)
+				.get();
+			if (existing) return { created: false, id: existing.id };
+		}
 
 		// Sent emails are always read — the sender obviously knows what they wrote.
 		// This prevents sent replies from inflating thread_unread_count.
@@ -871,5 +888,6 @@ export class MailboxDO extends DurableObject<Env> {
 		if (attachments.length > 0) {
 			this.db.insert(schema.attachments).values(attachments).run();
 		}
+		return { created: true, id: email.id };
 	}
 }

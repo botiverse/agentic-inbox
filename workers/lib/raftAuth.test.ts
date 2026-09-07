@@ -31,6 +31,7 @@ const validUserinfo = {
 	client_id: "agentic-inbox",
 	preferred_username: "Gogo",
 	name: "Gogo",
+	server_slug: "botiverse",
 };
 
 /** Capture the outgoing request and reply with `body` (json) at `status`. */
@@ -50,6 +51,7 @@ describe("validateRaftPrincipal", () => {
 		expect(p.type).toBe("agent");
 		expect(p.serverId).toBe(validUserinfo.server_id);
 		expect(p.preferredUsername).toBe("Gogo");
+		expect(p.serverSlug).toBe("botiverse");
 	});
 	it("rejects a non-botiverse server (server_not_allowed) when Flagship is absent", async () => {
 		const bad = { ...validUserinfo, server_id: "deadbeef-0000-0000-0000-000000000000" };
@@ -134,6 +136,7 @@ describe("ownerFromPrincipal", () => {
 		clientId: validUserinfo.client_id,
 		preferredUsername: validUserinfo.preferred_username,
 		name: validUserinfo.name,
+		serverSlug: validUserinfo.server_slug,
 	};
 	const humanPrincipal: RaftPrincipal = {
 		sub: "human-sub-1111",
@@ -142,6 +145,7 @@ describe("ownerFromPrincipal", () => {
 		clientId: validUserinfo.client_id,
 		preferredUsername: "artea",
 		name: "Artea",
+		serverSlug: validUserinfo.server_slug,
 	};
 
 	it("is raft:server:type:sub", () => {
