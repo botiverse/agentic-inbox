@@ -3,9 +3,8 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { Loader } from "@cloudflare/kumo";
-import { PlugsIcon, RobotIcon } from "@phosphor-icons/react";
+import { RobotIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
-import MCPPanel from "./MCPPanel";
 
 function LazyAgentPanel() {
 	const [AgentChat, setAgentChat] = useState<React.ComponentType | null>(
@@ -41,7 +40,7 @@ function LazyAgentPanel() {
 }
 
 export default function AgentSidebar() {
-	const [activeTab, setActiveTab] = useState<"agent" | "mcp">("agent");
+	const [activeTab] = useState<"agent">("agent");
 
 	return (
 		<div className="flex flex-col h-full">
@@ -59,18 +58,6 @@ export default function AgentSidebar() {
 					<RobotIcon size={14} weight={activeTab === "agent" ? "fill" : "regular"} />
 					Agent
 				</button>
-				<button
-					type="button"
-					onClick={() => setActiveTab("mcp")}
-					className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 bg-transparent cursor-pointer ${
-						activeTab === "mcp"
-							? "border-kumo-brand text-kumo-default"
-							: "border-transparent text-kumo-subtle hover:text-kumo-default"
-					}`}
-				>
-					<PlugsIcon size={14} weight={activeTab === "mcp" ? "fill" : "regular"} />
-					MCP
-				</button>
 			</div>
 
 			{/* Tab content — keep agent mounted so chat isn't lost */}
@@ -78,7 +65,6 @@ export default function AgentSidebar() {
 				<div className={activeTab === "agent" ? "h-full" : "hidden"}>
 					<LazyAgentPanel />
 				</div>
-				{activeTab === "mcp" && <MCPPanel />}
 			</div>
 		</div>
 	);
