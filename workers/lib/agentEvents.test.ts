@@ -176,27 +176,42 @@ describe("runInboundNotify", () => {
 		agentId: "agent-uuid",
 		agentName: "postel",
 	};
-	function env(settings: unknown) {
+	function env(byMailbox: Record<string, unknown>) {
 		return {
 			RAFT_API_ORIGIN: "https://api.raft.build",
 			RAFT_OAUTH_CLIENT_KEY: "agentic-inbox",
 			RAFT_OAUTH_CLIENT_SECRET: "s3cret",
 			BUCKET: {
-				get: async () => (settings == null ? null : { json: async () => settings }),
+				get: async (key: string) => {
+					const id = key.replace("mailboxes/", "").replace(".json", "");
+					const settings = byMailbox[id];
+					return settings == null ? null : { json: async () => settings };
+				},
 			},
 		};
 	}
 	const mail = {
 		mailbox,
 		emailId: "e1",
-		from: "noreply@example.com",
+		from: "artin@mail.build",
 		subject: "code",
 		rfcMessageId: "<m@x>",
 	};
+	const recipient = {
+		owner: "raft:s1:agent:agent-uuid",
+		inboxNotify: routing,
+	};
 
 	it("skips ownerless mailboxes", async () => {
-		const r = await runInboundNotify(env({}), mail);
+		const r = await runInboundNotify(env({ [mailbox]: {} }), mail);
 		expect(r.skipped).toBe("orphan");
+	});
+
+	it("skips an off-server sender instead of waking", async () => {
+		const r = await runInboundNotify(env({ [mailbox]: recipient }), {
+			...mail, from: "eve@evil.test",
+		});
+		expect(r.skipped).toBe("sender_not_allowed");
 	});
 
 	it("posts a metadata-only notification when routing matches", async () => {
@@ -220,8 +235,8 @@ describe("runInboundNotify", () => {
 			},
 		]);
 		const r = await runInboundNotify(env({
-			owner: "raft:s1:agent:agent-uuid",
-			inboxNotify: routing,
+			[mailbox]: recipient,
+			"artin@mail.build": { owner: "raft:s1:human:artin" },
 		}), mail, fetchImpl);
 		expect(r.post?.status).toBe("queued");
 		expect(r.post?.deduped).toBe(false);

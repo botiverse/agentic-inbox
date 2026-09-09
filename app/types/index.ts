@@ -14,6 +14,8 @@ export interface MailboxSettings {
 	signature?: SignatureSettings;
 	autoReply?: { enabled: boolean; subject: string; message: string };
 	agentSystemPrompt?: string;
+	/** Extra From addresses or domains that may wake besides same-server senders. */
+	inboxNotifyAllow?: string[];
 }
 
 export interface Mailbox {
