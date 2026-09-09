@@ -13,6 +13,9 @@ import {
 	settingsWithNotify,
 	publicInboxNotify,
 	applySettingsUpdate,
+	fromOnAllowList,
+	parseAllowList,
+	sameServerOwners,
 	type InboxNotifyRouting,
 } from "./inboxNotify";
 
@@ -142,10 +145,38 @@ describe("applySettingsUpdate", () => {
 	});
 });
 
+describe("same-server + allowlist sender gate", () => {
+	it("treats two raft owners on the same server as allowed, humans included", () => {
+		expect(sameServerOwners("raft:s1:agent:abc", "raft:s1:human:artin")).toBe(true);
+		expect(sameServerOwners("raft:s1:agent:abc", "raft:s2:agent:abc")).toBe(false);
+		expect(sameServerOwners("raft:s1:agent:abc", null)).toBe(false);
+	});
+	it("matches full addresses and domains on the extra allowlist", () => {
+		expect(parseAllowList([" Gmail.com ", "", "@botiverse.dev"])).toEqual(["gmail.com", "@botiverse.dev"]);
+		expect(fromOnAllowList("a@gmail.com", ["gmail.com"])).toBe(true);
+		expect(fromOnAllowList("a@gmail.com", ["@gmail.com"])).toBe(true);
+		expect(fromOnAllowList("alice@x.test", ["alice@x.test"])).toBe(true);
+		expect(fromOnAllowList("eve@x.test", ["alice@x.test"])).toBe(false);
+	});
+});
+
 describe("decideNotify", () => {
 	const owner = "raft:s1:agent:agent-uuid";
-	it("notifies an agent owner when routing matches", () => {
-		expect(decideNotify({ owner, routing })).toEqual({ action: "notify", routing });
+	const sameServerSender = "raft:s1:human:artin";
+	it("notifies an agent owner when routing matches and the sender is on the same server", () => {
+		expect(decideNotify({ owner, routing, senderOwner: sameServerSender, from: "artin@mail.build" }))
+			.toEqual({ action: "notify", routing });
+	});
+	it("skips an off-server or unknown sender unless the extra allowlist matches", () => {
+		expect(decideNotify({ owner, routing, from: "eve@evil.test" })).toEqual({
+			action: "skip", reason: "sender_not_allowed",
+		});
+		expect(decideNotify({
+			owner, routing, senderOwner: "raft:other:agent:x", from: "x@mail.build",
+		})).toEqual({ action: "skip", reason: "sender_not_allowed" });
+		expect(decideNotify({
+			owner, routing, from: "alerts@pager.test", allowList: ["pager.test"],
+		})).toEqual({ action: "notify", routing });
 	});
 	it("skips ownerless mailboxes instead of pretending someone is there", () => {
 		expect(decideNotify({ owner: null, routing })).toEqual({ action: "skip", reason: "orphan" });

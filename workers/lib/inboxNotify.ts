@@ -12,6 +12,10 @@
  *
  * Payload is metadata only — the body is fetched later via get-email.
  * Putting the body in the wake would make the injection surface built-in.
+ *
+ * Proactive wake is only for senders on the same Raft server (From maps to a
+ * mailbox whose owner.serverId matches) or on the mailbox `inboxNotifyAllow`
+ * list. Everyone else still receives the mail; they just don't get a wake.
  */
 
 export type InboxNotifyRouting = {
@@ -37,7 +41,8 @@ export type NotifySkipReason =
 	| "muted"
 	| "missing_routing"
 	| "routing_mismatch"
-	| "not_configured";
+	| "not_configured"
+	| "sender_not_allowed";
 
 const EVENT_ID_MAX = 200;
 /** Hex chars of SHA-256(full raw id) appended when the raw id exceeds 200. */
@@ -127,11 +132,43 @@ export function applySettingsUpdate(
 	return { ...existing, ...rest, owner: existing.owner, inboxNotify: existing.inboxNotify };
 }
 
+/** Extra wake allowlist: full addresses or domains (`gmail.com` / `@gmail.com`). */
+export function parseAllowList(v: unknown): string[] {
+	if (!Array.isArray(v)) return [];
+	return v.map((x) => String(x).trim().toLowerCase()).filter(Boolean);
+}
+
+export function fromOnAllowList(from: string, allow: string[]): boolean {
+	const addr = (from || "").trim().toLowerCase();
+	if (!addr || allow.length === 0) return false;
+	const at = addr.lastIndexOf("@");
+	const domain = at >= 0 ? addr.slice(at + 1) : "";
+	for (const raw of allow) {
+		const e = raw.replace(/^@/, "");
+		if (e === addr) return true;
+		if (domain && e === domain) return true;
+	}
+	return false;
+}
+
+export function sameServerOwners(
+	recipientOwner: string | null | undefined,
+	senderOwner: string | null | undefined,
+): boolean {
+	const a = parseOwner(recipientOwner);
+	const b = parseOwner(senderOwner);
+	return !!(a && b && a.serverId === b.serverId);
+}
+
 export function decideNotify(input: {
 	owner: string | null | undefined;
 	/** Explicit false is sticky mute. Undefined/true = notify. */
 	notifyInbox?: boolean | null;
 	routing: InboxNotifyRouting | null | undefined;
+	/** Owner of the From mailbox, if it exists on this service. */
+	senderOwner?: string | null;
+	from?: string | null;
+	allowList?: unknown;
 }): NotifyDecision {
 	const parts = parseOwner(input.owner);
 	if (!parts) return { action: "skip", reason: "orphan" };
@@ -141,7 +178,13 @@ export function decideNotify(input: {
 	if (input.routing.agentId !== parts.sub || input.routing.serverId !== parts.serverId) {
 		return { action: "skip", reason: "routing_mismatch" };
 	}
-	return { action: "notify", routing: input.routing };
+	if (sameServerOwners(input.owner, input.senderOwner)) {
+		return { action: "notify", routing: input.routing };
+	}
+	if (fromOnAllowList(input.from || "", parseAllowList(input.allowList))) {
+		return { action: "notify", routing: input.routing };
+	}
+	return { action: "skip", reason: "sender_not_allowed" };
 }
 
 async function sha256Hex(s: string, n: number): Promise<string> {

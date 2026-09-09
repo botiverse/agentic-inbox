@@ -202,11 +202,16 @@ export async function runInboundNotify(
 		owner?: string;
 		notifyInbox?: boolean;
 		inboxNotify?: InboxNotifyRouting;
+		inboxNotifyAllow?: unknown;
 	}>(env as never, input.mailbox);
+	const senderSettings = await readMailboxSettings<{ owner?: string }>(env as never, input.from);
 	const decision = decideNotify({
 		owner: settings?.owner,
 		notifyInbox: settings?.notifyInbox,
 		routing: settings?.inboxNotify,
+		senderOwner: senderSettings?.owner,
+		from: input.from,
+		allowList: settings?.inboxNotifyAllow,
 	});
 	if (decision.action === "skip") return { skipped: decision.reason };
 
