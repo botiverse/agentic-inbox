@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-	hashApiKey,
 	ownerCanAccess,
 	reservedHandleForLocalPart,
 	reservedHandleForAddress,
@@ -18,16 +17,6 @@ import {
 	asciiNamespaceForHandle,
 	isValidAsciiLocalPart,
 } from "./auth";
-
-describe("hashApiKey", () => {
-	it("produces a stable 64-char sha-256 hex and never echoes the raw key", async () => {
-		const h = await hashApiKey("aibx_secret123");
-		expect(h).toMatch(/^[0-9a-f]{64}$/);
-		expect(h).not.toContain("secret");
-		expect(await hashApiKey("aibx_secret123")).toBe(h); // stable
-		expect(await hashApiKey("aibx_other")).not.toBe(h); // distinct
-	});
-});
 
 describe("ownerCanAccess", () => {
 	it("admin can access any mailbox", () => {

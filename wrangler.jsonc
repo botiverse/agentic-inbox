@@ -171,8 +171,7 @@
 		],
 		"POLICY_AUD": "305afbc2-7500-4cfe-9d4a-f321e99c6e3f",
 		"TEAM_DOMAIN": "https://botiverse.cloudflareaccess.com",
-		// API_KEY is provided via `wrangler secret put API_KEY`, not committed.
-		// "API_KEY": "<set via wrangler secret>"
+		// Login with Raft is the only auth. The worker does not read an API key.
 	},
 	"send_email": [
 		{

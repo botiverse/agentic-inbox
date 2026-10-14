@@ -19,9 +19,9 @@ export type MailboxContext = {
 	Variables: {
 		mailboxStub: DurableObjectStub<MailboxDO>;
 		// Set by the auth middleware (workers/app.ts). `authOwner` is the resolved
-		// caller identity (an accountId / raft:${server_id}:${type}:${sub}, or
-		// "local:admin"); `authScope` is the presented key's scope (a mailbox id,
-		// "account", or "admin"); `authIsAdmin` short-circuits ownership checks.
+		// caller identity (raft:${server_id}:${type}:${sub}). `authScope` is
+		// "account" for a Login-with-Raft session. `authIsAdmin` short-circuits
+		// ownership checks; the middleware does not set it.
 		authOwner?: string;
 		authScope?: string;
 		authIsAdmin?: boolean;
@@ -48,8 +48,8 @@ export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) =
 	}
 
 	const settings = (await obj.json().catch(() => ({}))) as { owner?: string; inboxNotify?: unknown };
-	// Owner-scoped access: enforce for scoped-key callers. Legacy callers (CF
-	// Access human session with no scope) pass through during the transition.
+	// Owner-scoped access. A Raft session sets authScope. Legacy callers (CF
+	// Access with no scope) pass through during the transition.
 	const authScope = c.get("authScope");
 	if (authScope) {
 		const allowed = mailboxAccessAllowed(
@@ -64,7 +64,7 @@ export const requireMailbox = createMiddleware<MailboxContext>(async (c, next) =
 			if (!settings.owner) {
 				return c.json({ error: "Mailbox is not linked to any account; claim it first to gain access", code: "MAILBOX_NOT_LINKED" }, 403);
 			}
-			return c.json({ error: "Forbidden: this key is not scoped to this mailbox", code: "FORBIDDEN" }, 403);
+			return c.json({ error: "Forbidden: this session cannot access this mailbox", code: "FORBIDDEN" }, 403);
 		}
 	}
 
