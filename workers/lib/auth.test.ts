@@ -9,8 +9,9 @@ import {
 	maxMailboxesForPlan,
 	canCreateMailbox,
 	serverIdFromOwner,
-	planForOwner,
-	serverAllowed,
+	planFromServerTier,
+	BOTIVERSE_SERVER_ID,
+	isServerAllowed,
 	claimAllowedForHandle,
 	isReservedSystemLocalPart,
 	classifyClaim,
@@ -122,10 +123,13 @@ describe("plan by raft-server tier", () => {
 		expect(serverIdFromOwner("local:admin")).toBeNull();
 		expect(serverIdFromOwner(null)).toBeNull();
 	});
-	it("owner on a pro server → pro (10); else free (1)", () => {
-		expect(planForOwner("raft:s-pro:agent:a", ["s-pro"])).toBe("pro");
-		expect(planForOwner("raft:s-free:agent:a", ["s-pro"])).toBe("free");
-		expect(planForOwner("raft:s-free:agent:a", [])).toBe("free");
+	it("maps Raft plan_tier onto the mailbox plan", () => {
+		expect(planFromServerTier("paid")).toBe("pro");
+		expect(planFromServerTier("enterprise")).toBe("pro");
+		expect(planFromServerTier("free")).toBe("free");
+		expect(planFromServerTier("")).toBe("free");
+		expect(planFromServerTier(undefined)).toBe("free");
+		expect(planFromServerTier(true)).toBe("free");
 	});
 });
 
@@ -223,13 +227,27 @@ describe("classifyClaim (adopt-on-claim disposition)", () => {
 	});
 });
 
-describe("serverAllowed (botiverse-only login gate)", () => {
-	it("empty allowlist = unrestricted", () => {
-		expect(serverAllowed("s-any", [])).toBe(true);
+describe("isServerAllowed", () => {
+	it("allows only botiverse when Flagship is absent or errors", async () => {
+		expect(await isServerAllowed(BOTIVERSE_SERVER_ID)).toBe(true);
+		expect(await isServerAllowed("other-server")).toBe(false);
+		expect(await isServerAllowed(null)).toBe(false);
+		const broken = {
+			getBooleanDetails: async () => {
+				throw new Error("flagship down");
+			},
+		} as never;
+		expect(await isServerAllowed(BOTIVERSE_SERVER_ID, broken)).toBe(true);
+		expect(await isServerAllowed("other-server", broken)).toBe(false);
 	});
-	it("gates login to allowed servers", () => {
-		expect(serverAllowed("s-botiverse", ["s-botiverse"])).toBe(true);
-		expect(serverAllowed("s-other", ["s-botiverse"])).toBe(false);
-		expect(serverAllowed(null, ["s-botiverse"])).toBe(false);
+	it("uses a targeting match and denies when the flag evaluates without one", async () => {
+		const flags = {
+			getBooleanDetails: async (_key: string, _def: boolean, ctx?: { serverId?: string }) => {
+				if (ctx?.serverId === "custom") return { flagKey: "server-allowed", value: true, reason: "TARGETING_MATCH" };
+				return { flagKey: "server-allowed", value: false, reason: "DEFAULT" };
+			},
+		} as never;
+		expect(await isServerAllowed("custom", flags)).toBe(true);
+		expect(await isServerAllowed(BOTIVERSE_SERVER_ID, flags)).toBe(false);
 	});
 });

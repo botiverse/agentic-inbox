@@ -286,7 +286,6 @@ describe("send routing: internal / allow-listed external / refused", () => {
 		const stored: Array<{ folder: string; row: Record<string, unknown> }> = [];
 		const e = {
 			DOMAINS: "mail.build",
-			EXTERNAL_SEND_DOMAINS: "gmail.com,cat.ms",
 			EMAIL_ADDRESSES: [],
 			// the real helper reads `result.messageId`, so the fake must return it
 			EMAIL: { send: sendImpl ?? (async (m: unknown) => { sent.push(m); return { messageId: "test-msg-id" }; }) },
@@ -321,7 +320,7 @@ describe("send routing: internal / allow-listed external / refused", () => {
 		expect(res.status).toBe(400);
 		const b = await res.json() as { code: string; allowedExternalDomains: string[] };
 		expect(b.code).toBe("SEND_EXTERNAL_UNSUPPORTED");
-		expect(b.allowedExternalDomains).toEqual(["gmail.com", "cat.ms"]);
+		expect(b.allowedExternalDomains).toEqual(["gmail.com", "botiverse.dev", "cat.ms", "oranix.io", "mercury.com"]);
 		expect(sent).toHaveLength(0); // nothing was handed to the provider
 	});
 

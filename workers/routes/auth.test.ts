@@ -3,8 +3,6 @@ import { authApp } from "./auth";
 
 const raftEnv = {
 	DOMAINS: "mail.build",
-	ALLOWED_SERVER_IDS: "95f993fa-2a68-4797-b8ae-7beb7d984ada,172dbfbf-3e86-4a85-9331-d4c3f5c1c558,65598229-cd0a-4e92-96f3-c33e7e2e4cc1",
-	PRO_SERVER_IDS: "95f993fa-2a68-4797-b8ae-7beb7d984ada",
 	RAFT_OAUTH_CLIENT_KEY: "agentic-inbox",
 	RAFT_OAUTH_CLIENT_SECRET: "s3cret",
 	RAFT_SESSION_SECRET: "test-session-secret-32-chars-long-abc",
@@ -48,6 +46,9 @@ describe("Route-level /auth/raft/callback contracts & error diagnostics", () => 
 			if (url.endsWith("/api/oauth/userinfo")) {
 				return new Response(JSON.stringify(validUserinfo), { status: 200, headers: { "Content-Type": "application/json" } });
 			}
+			if (url.endsWith("/api/oauth/serverinfo")) {
+				return new Response(JSON.stringify({ plan_tier: "paid" }), { status: 200, headers: { "Content-Type": "application/json" } });
+			}
 			return new Response("{}", { status: 404 });
 		}) as typeof fetch;
 
@@ -80,7 +81,7 @@ describe("Route-level /auth/raft/callback contracts & error diagnostics", () => 
 			expect(body.errorCode).toBe("RAFT_SERVER_NOT_ALLOWED");
 			expect(body.reason).toBe("server_not_allowed");
 			expect(body.error).toContain("unauthorized-server-999");
-			expect(body.suggestedNextAction).toContain("ALLOWED_SERVER_IDS");
+			expect(body.suggestedNextAction).toContain("server-allowed");
 			expect(res.headers.get("Cache-Control")).toBe("no-store");
 			expect(res.headers.get("Set-Cookie")).toContain("agentic_inbox_login_state=;");
 		} finally {

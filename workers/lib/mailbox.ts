@@ -28,6 +28,8 @@ export type MailboxContext = {
 		// The caller's raft handle (userinfo preferred_username), set from the
 		// session by the OAuth middleware. Used for claim namespace enforcement.
 		authHandle?: string;
+		/** Mailbox plan stamped at login from Raft serverinfo. Missing → free. */
+		authPlan?: "free" | "pro";
 		// Login-time routing cache for Agent Inbox notify (slug + handle). Not an identity key.
 		authNotifyRouting?: InboxNotifyRouting | null;
 	};

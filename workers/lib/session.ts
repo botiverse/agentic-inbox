@@ -25,6 +25,11 @@ export interface RaftPrincipal {
 	name: string | null;
 	/** Display/routing slug from userinfo. Not an identity key. */
 	serverSlug: string | null;
+	/**
+	 * Mailbox plan from Raft `GET /api/oauth/serverinfo` at login.
+	 * `paid` → pro. Missing on sessions sealed before that call; treat those as free.
+	 */
+	plan?: "free" | "pro";
 }
 
 export interface SessionPayload {

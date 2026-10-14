@@ -20,6 +20,7 @@ import {
 	exchangeAuthorizationCode,
 	exchangeAgentRequest,
 	fetchUserinfo,
+	fetchServerPlan,
 	validateRaftPrincipal,
 	raftSetupUrl,
 	isBrowserCallbackFlow,
@@ -49,9 +50,6 @@ export function readRaftConfig(env: any): RaftOAuthConfig {
 		appOrigin: env.RAFT_APP_ORIGIN as string,
 		clientKey: env.RAFT_OAUTH_CLIENT_KEY as string,
 		clientSecret: env.RAFT_OAUTH_CLIENT_SECRET as string,
-		allowedServerIds: (typeof env.ALLOWED_SERVER_IDS === "string" ? env.ALLOWED_SERVER_IDS.split(",") : [])
-			.map((s) => s.trim())
-			.filter(Boolean),
 	};
 }
 
@@ -99,6 +97,7 @@ authApp.all("/auth/raft/callback", async (c) => {
 		}
 		const userinfo = await fetchUserinfo(config, token.access_token);
 		const principal = await validateRaftPrincipal(userinfo, config, c.env.FLAGS);
+		principal.plan = await fetchServerPlan(config, token.access_token);
 		const ttl = Math.max(1, Math.min(typeof token.expires_in === "number" ? token.expires_in : SESSION_TTL_SECONDS, SESSION_TTL_SECONDS));
 		const sealed = await sealSession({ principal, expiresAt: Date.now() + ttl * 1000 }, c.env.RAFT_SESSION_SECRET as string);
 		c.header("Set-Cookie", sessionCookie(c.req.raw, sealed, ttl), { append: true });
