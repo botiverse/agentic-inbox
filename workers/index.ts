@@ -26,7 +26,7 @@ import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, read
 import { runInboundNotify } from "./lib/agentEvents";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
-import { getPlanForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart, serverIdFromOwner } from "./lib/auth";
+import { claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart, serverIdFromOwner } from "./lib/auth";
 import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDomains } from "./lib/flags";
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
@@ -306,7 +306,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// two rapid claims can't both slip past the limit (dogfood: Cardy — the old
 	// kv.list count lagged ~60s and let a 3rd mailbox through on free=1). Admin
 	// gets an effectively unlimited allowance but is still recorded.
-	const plan = await getPlanForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS), c.env.FLAGS);
+	const plan = c.get("authPlan") === "pro" ? "pro" : "free";
 	const limit = isAdmin
 		? Number.MAX_SAFE_INTEGER
 		: await mailboxQuotaLimit(c.env.FLAGS, plan, serverIdFromOwner(owner));
@@ -499,7 +499,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	// lets us prove alignment on a controlled recipient before every agent can mail
 	// anyone. Widen it once the first real Authentication-Results comes back clean.
 	const isInternal = isAddressAllowed(to, (c.env.EMAIL_ADDRESSES ?? []) as string[], parseDomains(c.env.DOMAINS));
-	const externalDomains = await resolveExternalSendDomains(c.env.FLAGS, c.env.EXTERNAL_SEND_DOMAINS, flagContext(c.get("authOwner"), from));
+	const externalDomains = await resolveExternalSendDomains(c.env.FLAGS, flagContext(c.get("authOwner"), from));
 	const toDomain = to.split("@")[1] ?? "";
 	if (!isInternal && !externalDomains.includes(toDomain)) {
 		return c.json({

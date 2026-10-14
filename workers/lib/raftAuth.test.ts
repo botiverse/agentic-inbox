@@ -11,6 +11,7 @@ import {
 	exchangeAgentRequest,
 	fetchUserinfo,
 	validateRaftPrincipal,
+	fetchServerPlan,
 	ownerFromPrincipal,
 	raftSetupUrl,
 	isBrowserCallbackFlow,
@@ -21,7 +22,6 @@ const config: RaftOAuthConfig = {
 	appOrigin: "https://app.raft.build",
 	clientKey: "agentic-inbox",
 	clientSecret: "s3cret",
-	allowedServerIds: ["95f993fa-2a68-4797-b8ae-7beb7d984ada"],
 };
 
 const validUserinfo = {
@@ -58,10 +58,10 @@ describe("validateRaftPrincipal", () => {
 		await expect(validateRaftPrincipal(bad, config)).rejects.toThrowError(RaftAuthError);
 		try { await validateRaftPrincipal(bad, config); } catch (e) {
 			expect((e as RaftAuthError).reason).toBe("server_not_allowed");
-			expect((e as RaftAuthError).suggestedNextAction).toContain("ALLOWED_SERVER_IDS");
+			expect((e as RaftAuthError).suggestedNextAction).toContain("server-allowed");
 		}
 	});
-	it("falls back to static allowlist when Flagship returns reason=DEFAULT", async () => {
+	it("denies when Flagship evaluates without a targeting match", async () => {
 		const mockFlags = {
 			getBooleanDetails: async (key: string, def: boolean) => ({
 				flagKey: key,
@@ -69,10 +69,7 @@ describe("validateRaftPrincipal", () => {
 				reason: "DEFAULT",
 			}),
 		} as any;
-		// Allowed static server passes
-		const p = await validateRaftPrincipal(validUserinfo, config, mockFlags);
-		expect(p.serverId).toBe(validUserinfo.server_id);
-		// Unlisted server rejected
+		await expect(validateRaftPrincipal(validUserinfo, config, mockFlags)).rejects.toThrowError(RaftAuthError);
 		const bad = { ...validUserinfo, server_id: "unlisted-server" };
 		await expect(validateRaftPrincipal(bad, config, mockFlags)).rejects.toThrowError(RaftAuthError);
 	});
@@ -204,6 +201,19 @@ describe("fetchUserinfo", () => {
 	it("throws userinfo_failed on non-ok", async () => {
 		const cap: { req?: Request; bodyText?: string } = {};
 		await expect(fetchUserinfo(config, "x", mockFetch(cap, {}, 401))).rejects.toMatchObject({ reason: "userinfo_failed" });
+	});
+});
+
+describe("fetchServerPlan", () => {
+	it("treats plan_tier paid as pro and anything else, including errors, as free", async () => {
+		const cap: { req?: Request; bodyText?: string } = {};
+		expect(await fetchServerPlan(config, "tok", mockFetch(cap, { plan_tier: "paid" }))).toBe("pro");
+		expect(cap.req?.url).toBe("https://api.raft.build/api/oauth/serverinfo");
+		expect(cap.req?.headers.get("Authorization")).toBe("Bearer tok");
+		expect(await fetchServerPlan(config, "tok", mockFetch({}, { plan_tier: "free" }))).toBe("free");
+		expect(await fetchServerPlan(config, "tok", mockFetch({}, { plan_tier: "team" }))).toBe("pro");
+		expect(await fetchServerPlan(config, "tok", mockFetch({}, {}, 500))).toBe("free");
+		expect(await fetchServerPlan(config, "tok", (async () => { throw new Error("network"); }) as typeof fetch)).toBe("free");
 	});
 });
 

@@ -17,6 +17,8 @@ const OVERRIDE_REASONS = new Set(["TARGETING_MATCH", "SPLIT"]);
 
 export type FlagContext = Record<string, string | number | boolean>;
 
+export const DEFAULT_EXTERNAL_SEND_DOMAINS = "gmail.com,botiverse.dev,cat.ms,oranix.io,mercury.com";
+
 export const DEFAULT_QUOTA_FREE = 1;
 export const DEFAULT_QUOTA_PRO = 10;
 export const DEFAULT_SEND_PER_HOUR = 20;
@@ -101,10 +103,8 @@ export function flagContext(owner: string | undefined, mailboxId: string): FlagC
  */
 export async function resolveExternalSendDomains(
 	flags: FlagshipBinding | undefined,
-	fallbackRaw: string | undefined,
 	context?: FlagContext,
 ): Promise<string[]> {
-	const fallback = parseDomains(fallbackRaw);
-	const raw = await targetedString(flags, "external-send-domains", fallback.join(","), context);
+	const raw = await targetedString(flags, "external-send-domains", DEFAULT_EXTERNAL_SEND_DOMAINS, context);
 	return parseDomains(raw);
 }

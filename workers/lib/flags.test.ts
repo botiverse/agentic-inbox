@@ -16,14 +16,26 @@ describe("flagship product knobs", () => {
 		expect(await mailboxQuotaLimit(undefined, "free", "s1")).toBe(1);
 		expect(await mailboxQuotaLimit(undefined, "pro", "s1")).toBe(10);
 		expect(await sendRateLimits(undefined)).toEqual({ perHour: 20, perDay: 100 });
-		expect(await resolveExternalSendDomains(undefined, "Gmail.com, cat.ms")).toEqual(["gmail.com", "cat.ms"]);
+		expect(await resolveExternalSendDomains(undefined)).toEqual([
+			"gmail.com",
+			"botiverse.dev",
+			"cat.ms",
+			"oranix.io",
+			"mercury.com",
+		]);
 
 		const staticDefault = flags({
 			getNumberDetails: async (_key, fallback) => ({ flagKey: _key, value: 999, reason: "DEFAULT" }),
 			getStringDetails: async (_key, fallback) => ({ flagKey: _key, value: "other.com", reason: "STATIC" }),
 		});
 		expect(await mailboxQuotaLimit(staticDefault, "pro", "s1")).toBe(10);
-		expect(await resolveExternalSendDomains(staticDefault, "gmail.com")).toEqual(["gmail.com"]);
+		expect(await resolveExternalSendDomains(staticDefault)).toEqual([
+			"gmail.com",
+			"botiverse.dev",
+			"cat.ms",
+			"oranix.io",
+			"mercury.com",
+		]);
 	});
 
 	it("uses a number only on TARGETING_MATCH or SPLIT, and rejects a negative", async () => {
@@ -43,12 +55,12 @@ describe("flagship product knobs", () => {
 		const matched = flags({
 			getStringDetails: async (key) => ({ flagKey: key, value: "Example.com, ", reason: "TARGETING_MATCH" }),
 		});
-		expect(await resolveExternalSendDomains(matched, "gmail.com")).toEqual(["example.com"]);
+		expect(await resolveExternalSendDomains(matched)).toEqual(["example.com"]);
 
 		const empty = flags({
 			getStringDetails: async (key) => ({ flagKey: key, value: "", reason: "TARGETING_MATCH" }),
 		});
-		expect(await resolveExternalSendDomains(empty, "gmail.com")).toEqual([]);
+		expect(await resolveExternalSendDomains(empty)).toEqual([]);
 	});
 
 	it("falls back when evaluation throws", async () => {
@@ -61,7 +73,13 @@ describe("flagship product knobs", () => {
 			},
 		});
 		expect(await mailboxQuotaLimit(broken, "pro", null)).toBe(10);
-		expect(await resolveExternalSendDomains(broken, "cat.ms")).toEqual(["cat.ms"]);
+		expect(await resolveExternalSendDomains(broken)).toEqual([
+			"gmail.com",
+			"botiverse.dev",
+			"cat.ms",
+			"oranix.io",
+			"mercury.com",
+		]);
 	});
 
 	it("puts serverId on the context only when the owner id has one", () => {

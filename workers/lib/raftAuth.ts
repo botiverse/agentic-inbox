@@ -15,13 +15,13 @@
  *
  * Unlike the dashboard (where agents are context-only), an agentic-inbox agent is
  * a first-class mailbox owner: both flows seal a session the middleware maps to
- * authOwner + authScope="account" + authHandle. botiverse-only login is enforced
- * here via ALLOWED_SERVER_IDS (server_not_allowed).
+ * authOwner + authScope="account" + authHandle. Which servers may log in is
+ * Flagship `server-allowed` (server_not_allowed).
  */
 
 import type { RaftPrincipal } from "./session";
 import type { FlagshipBinding } from "../types";
-import { serverAllowed, isServerAllowed } from "./auth";
+import { isServerAllowed, planFromServerTier } from "./auth";
 
 export type AuthFailure =
 	| "missing_code"
@@ -55,7 +55,6 @@ export interface RaftOAuthConfig {
 	/** PUBLIC client key (e.g. "agentic-inbox") — used for BOTH the setup client_id AND Basic auth. Never the UUID. */
 	clientKey: string;
 	clientSecret: string;
-	allowedServerIds: readonly string[]; // botiverse-only gate; "*" = any
 }
 
 interface TokenResponse {
@@ -171,6 +170,34 @@ export async function fetchUserinfo(config: RaftOAuthConfig, accessToken: string
 }
 
 /**
+ * Mailbox plan for the server this access token belongs to.
+ * `GET /api/oauth/serverinfo` → `plan_tier`. `paid` (or any non-free tier) is pro.
+ * A failed call is free, not pro.
+ */
+export async function fetchServerPlan(
+	config: RaftOAuthConfig,
+	accessToken: string,
+	fetchImpl: typeof fetch = fetch,
+): Promise<"free" | "pro"> {
+	try {
+		const res = await fetchImpl(`${config.apiOrigin}/api/oauth/serverinfo`, {
+			headers: { Authorization: `Bearer ${accessToken}` },
+			cache: "no-store",
+		});
+		if (!res.ok) {
+			console.warn(`[raft] serverinfo HTTP ${res.status}`);
+			return "free";
+		}
+		const body = await res.json().catch(() => null);
+		if (!isRecord(body)) return "free";
+		return planFromServerTier(body.plan_tier);
+	} catch (err) {
+		console.warn("[raft] serverinfo failed:", err);
+		return "free";
+	}
+}
+
+/**
  * Validate userinfo into a principal. Trusts ONLY sub/type/server_id/client_id;
  * carries preferred_username as a display/handle hint (mutable — the claim
  * anti-squat treats it as v0 handle; hardening anchors to sub as a fast-follow).
@@ -198,18 +225,16 @@ export async function validateRaftPrincipal(userinfo: unknown, config: RaftOAuth
 			`Principal type \x27${type}\x27 is invalid (expected \x27agent\x27 or \x27human\x27).`,
 		);
 	}
-	// botiverse-only: server_id must be allow-listed. Login-time gate ONLY (once,
-	// here) — a sealed session is itself proof the server was allowed, so the
-	// per-request middleware trusts the owner and does NOT re-check. Uses the
-	// shared serverAllowed from lib/auth (single source of truth).
-	const allowed = await isServerAllowed(serverId, config.allowedServerIds as string[], flags);
+	// Login-time gate ONLY (once, here). A sealed session is itself proof the
+	// server was allowed, so the per-request middleware does not re-check.
+	const allowed = await isServerAllowed(serverId, flags);
 	if (!allowed) {
 		throw new RaftAuthError(
 			"RAFT_SERVER_NOT_ALLOWED",
 			"server_not_allowed",
 			403,
-			`Server \x27${serverId}\x27 is not in the allowed servers list for mail.build.`,
-			`Ask a workspace admin to add server ID \x27${serverId}\x27 to ALLOWED_SERVER_IDS or Cloudflare Flagship configuration.`,
+			`Server \x27${serverId}\x27 is not allowed to sign in to mail.build.`,
+			`Ask a workspace admin to add a Flagship server-allowed rule for server ID \x27${serverId}\x27.`,
 		);
 	}
 	// The token was issued to OUR app; the presented client_id must match the key we authenticate as.

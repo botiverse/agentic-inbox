@@ -115,25 +115,12 @@ export function serverIdFromOwner(owner: string | null | undefined): string | nu
 	return m ? m[1] : null;
 }
 
-/**
- * Whether a raft server_id is allowed to sign in. When `allowedServerIds` is
- * empty, all servers are allowed (unrestricted); otherwise login is gated to the
- * listed servers (v0: botiverse-only — tygg 2026-07-15). Enforce in the OAuth
- * callback after userinfo.
- */
-export function serverAllowed(serverId: string | null | undefined, allowedServerIds: string[]): boolean {
-	if (allowedServerIds.length === 0) return true;
-	return !!serverId && allowedServerIds.includes(serverId);
-}
+/** Botiverse. Used only when Flagship cannot be evaluated, so a Flagship outage does not lock this server out. */
+export const BOTIVERSE_SERVER_ID = "95f993fa-2a68-4797-b8ae-7beb7d984ada";
 
-/**
- * Derive a plan for an owner. Tiering is at the raft-server level: an owner
- * whose server_id is in `proServerIds` is `pro`, otherwise `free`.
- * (free=1 mailbox, pro=10 — tygg 2026-07-14.)
- */
-export function planForOwner(owner: string, proServerIds: string[]): "free" | "pro" {
-	const sid = serverIdFromOwner(owner);
-	return sid && proServerIds.includes(sid) ? "pro" : "free";
+/** `plan_tier` from Raft serverinfo. Anything other than `free` is paid → pro. Missing or unknown → free. */
+export function planFromServerTier(planTier: unknown): "free" | "pro" {
+	return typeof planTier === "string" && planTier.length > 0 && planTier !== "free" ? "pro" : "free";
 }
 
 /** Whether an owner on `plan` may create another mailbox given their current count. */
@@ -247,59 +234,29 @@ export function createAllowedByPrefix(
 
 import type { FlagshipBinding } from "../types";
 
+const FLAG_OVERRIDE = new Set(["TARGETING_MATCH", "SPLIT"]);
+
 /**
- * Whether a raft server_id is allowed to sign in.
- * Evaluates Cloudflare Flagship dynamic flag "server-allowed" first (with context { serverId }),
- * and falls back to static allowedServerIds from wrangler config.
+ * Whether a raft server_id may sign in. Flagship `server-allowed` is the decision.
+ * A targeting match uses the flag value. A completed evaluation that did not match
+ * denies (the flag default is false). If Flagship cannot be evaluated, only
+ * botiverse is allowed.
  */
 export async function isServerAllowed(
 	serverId: string | null | undefined,
-	allowedServerIds: string[],
 	flags?: FlagshipBinding,
 ): Promise<boolean> {
 	if (!serverId) return false;
-	if (flags) {
-		try {
-			if (typeof flags.getBooleanDetails === "function") {
-				const details = await flags.getBooleanDetails("server-allowed", false, { serverId });
-				if (details.reason === "TARGETING_MATCH" || details.reason === "SPLIT") {
-					return details.value;
-				}
-			} else {
-				const flagVal = await flags.getBooleanValue("server-allowed", false, { serverId });
-				if (flagVal) return true;
-			}
-		} catch (err) {
-			console.warn("[flagship] error evaluating server-allowed flag:", err);
-		}
+	if (!flags || typeof flags.getBooleanDetails !== "function") {
+		return serverId === BOTIVERSE_SERVER_ID;
 	}
-	return serverAllowed(serverId, allowedServerIds);
-}
-
-/**
- * Derive plan for owner with Cloudflare Flagship dynamic flag "pro-tier-server" evaluation.
- * Explicit TARGETING_MATCH overrides static tiering; default/disabled falls back to static list.
- */
-export async function getPlanForOwner(
-	owner: string,
-	proServerIds: string[],
-	flags?: FlagshipBinding,
-): Promise<"free" | "pro"> {
-	const sid = serverIdFromOwner(owner);
-	if (flags && sid) {
-		try {
-			if (typeof flags.getBooleanDetails === "function") {
-				const details = await flags.getBooleanDetails("pro-tier-server", false, { serverId: sid });
-				if (details.reason === "TARGETING_MATCH" || details.reason === "SPLIT") {
-					return details.value ? "pro" : "free";
-				}
-			} else {
-				const isPro = await flags.getBooleanValue("pro-tier-server", false, { serverId: sid });
-				if (isPro) return "pro";
-			}
-		} catch (err) {
-			console.warn("[flagship] error evaluating pro-tier-server flag:", err);
-		}
+	try {
+		const details = await flags.getBooleanDetails("server-allowed", false, { serverId });
+		if (details.reason && FLAG_OVERRIDE.has(details.reason)) return details.value === true;
+		if (details.reason === "ERROR" || !details.reason) return serverId === BOTIVERSE_SERVER_ID;
+		return false;
+	} catch (err) {
+		console.warn("[flagship] error evaluating server-allowed flag:", err);
+		return serverId === BOTIVERSE_SERVER_ID;
 	}
-	return planForOwner(owner, proServerIds);
 }

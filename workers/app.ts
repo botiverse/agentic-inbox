@@ -50,7 +50,6 @@ function readRaftConfig(env: Env): RaftOAuthConfig {
 		appOrigin: (env.RAFT_APP_ORIGIN ?? "").replace(/\/+$/, ""),
 		clientKey: env.RAFT_OAUTH_CLIENT_KEY ?? "",
 		clientSecret: env.RAFT_OAUTH_CLIENT_SECRET ?? "",
-		allowedServerIds: (env.ALLOWED_SERVER_IDS ?? "").split(/[,\s]+/).map((s) => s.trim()).filter(Boolean),
 	};
 }
 
@@ -150,6 +149,7 @@ app.use("*", async (c, next) => {
 			c.set("authScope", "account");
 			c.set("authIsAdmin", false);
 			if (session.principal.preferredUsername) c.set("authHandle", session.principal.preferredUsername);
+			c.set("authPlan", session.principal.plan === "pro" ? "pro" : "free");
 			c.set("authNotifyRouting", routingFromPrincipal(session.principal));
 			return next();
 		}
