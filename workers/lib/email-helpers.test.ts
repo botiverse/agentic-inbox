@@ -126,6 +126,7 @@ describe("toApiEmail (thread GET must match get-email from/to)", () => {
 		expect(api.to).toBe("artin@mail.build");
 		expect(api.body_html).toBe("<p>hello</p>");
 		expect(api.body_text).toBe("hello");
+		expect(api.untrusted).toBe(true);
 		expect("body" in api).toBe(false);
 	});
 	it("goes red if someone returns the raw row without mapping", () => {

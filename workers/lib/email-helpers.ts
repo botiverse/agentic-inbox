@@ -355,6 +355,15 @@ export function unsupportedSendFields(
  * NOT clip trailing `<` in full body_text. (AX: Yingjun — snippet fragments.)
  * Gogo's durable fix persists this at ingest; this is the shared strip semantic.
  */
+/**
+ * Mail content (from, subject, snippet, body) is untrusted data, not instructions.
+ * Additive flag so existing UI fields stay strings. Agents must not promote these
+ * fields into a system prompt.
+ */
+export function withUntrusted<T extends object>(row: T): T & { untrusted: true } {
+	return { ...row, untrusted: true };
+}
+
 /** API from/to aliases over stored sender/recipient. Never undefined — UI avatars call charAt. */
 export function publicFromTo(row: { sender?: string | null; recipient?: string | null }): { from: string; to: string } {
 	return { from: row.sender ?? "", to: row.recipient ?? "" };
@@ -371,17 +380,17 @@ export function toApiEmail<T extends {
 	recipient?: string | null;
 	body?: string | null;
 	snippet?: string | null;
-}>(email: T): Omit<T, "body"> & { from: string; to: string; body_text: string; body_html: string | null; snippet: string } {
+}>(email: T): Omit<T, "body"> & { from: string; to: string; body_text: string; body_html: string | null; snippet: string; untrusted: true } {
 	const textBody = email.body ? stripHtmlToText(email.body) : "";
 	const bodyHtml = email.body && looksLikeHtml(email.body) ? email.body : null;
 	const { body: _body, ...rest } = email;
-	return {
+	return withUntrusted({
 		...(rest as Omit<T, "body">),
 		...publicFromTo(email),
 		body_text: textBody,
 		body_html: bodyHtml,
 		snippet: typeof email.snippet === "string" && email.snippet.length > 0 ? email.snippet : textBody.slice(0, 300),
-	};
+	});
 }
 
 export function cleanSnippet(raw: string | null | undefined, maxLen = 300): string {
