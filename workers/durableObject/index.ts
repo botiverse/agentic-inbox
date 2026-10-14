@@ -790,10 +790,13 @@ export class MailboxDO extends DurableObject<Env> {
 
 	/**
 	 * Check if the mailbox has exceeded the send rate limit.
-	 * Limits: 20 emails per hour, 100 per day per mailbox.
+	 * Defaults: 20 emails per hour, 100 per day per mailbox. Callers may pass
+	 * Flagship-resolved caps; omitted fields keep those defaults.
 	 * Returns null if under limit, or an error message string if exceeded.
 	 */
-	async checkSendRateLimit(): Promise<string | null> {
+	async checkSendRateLimit(limits?: { perHour?: number; perDay?: number }): Promise<string | null> {
+		const perHour = limits?.perHour ?? 20;
+		const perDay = limits?.perDay ?? 100;
 		const hourRow = [...this.ctx.storage.sql.exec(
 			`SELECT COUNT(*) as cnt FROM emails
 			 WHERE folder_id = ?1
@@ -801,8 +804,8 @@ export class MailboxDO extends DurableObject<Env> {
 			Folders.SENT,
 		)][0] as { cnt: number } | undefined;
 
-		if ((hourRow?.cnt ?? 0) >= 20) {
-			return "Rate limit exceeded: max 20 emails per hour per mailbox";
+		if ((hourRow?.cnt ?? 0) >= perHour) {
+			return `Rate limit exceeded: max ${perHour} emails per hour per mailbox`;
 		}
 
 		const dayRow = [...this.ctx.storage.sql.exec(
@@ -812,8 +815,8 @@ export class MailboxDO extends DurableObject<Env> {
 			Folders.SENT,
 		)][0] as { cnt: number } | undefined;
 
-		if ((dayRow?.cnt ?? 0) >= 100) {
-			return "Rate limit exceeded: max 100 emails per day per mailbox";
+		if ((dayRow?.cnt ?? 0) >= perDay) {
+			return `Rate limit exceeded: max ${perDay} emails per day per mailbox`;
 		}
 
 		return null;
