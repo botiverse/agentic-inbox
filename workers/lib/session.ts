@@ -27,7 +27,8 @@ export interface RaftPrincipal {
 	serverSlug: string | null;
 	/**
 	 * Mailbox plan from Raft `GET /api/oauth/serverinfo` at login.
-	 * `paid` → pro. Missing on sessions sealed before that call; treat those as free.
+	 * Only `free` and `pro` are a login. Sessions sealed before this field
+	 * existed are rejected by openSession so they must log in again.
 	 */
 	plan?: "free" | "pro";
 }
@@ -95,6 +96,9 @@ export async function openSession(request: Request, secret: string): Promise<Ses
 		// Re-validate the sealed principal shape (defense in depth; a tampered or
 		// truncated payload must not yield a half-formed identity).
 		if (!p || (p.type !== "agent" && p.type !== "human") || !p.sub || !p.serverId || !p.clientId) return null;
+		// A missing or unexpected plan is a session sealed before serverinfo
+		// stamping. It is not a login. `free` stays valid.
+		if (p.plan !== "free" && p.plan !== "pro") return null;
 		return payload;
 	} catch {
 		return null;

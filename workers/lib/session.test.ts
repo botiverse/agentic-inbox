@@ -21,6 +21,7 @@ const principal: RaftPrincipal = {
 	preferredUsername: "Gogo",
 	name: "Gogo",
 	serverSlug: "botiverse",
+	plan: "pro",
 };
 
 function reqWithCookie(setCookie: string): Request {
@@ -37,6 +38,23 @@ describe("session seal/open round-trip", () => {
 		expect(opened?.principal.sub).toBe(principal.sub);
 		expect(opened?.principal.type).toBe("agent");
 		expect(opened?.principal.serverId).toBe(principal.serverId);
+		expect(opened?.principal.plan).toBe("pro");
+	});
+
+	it("accepts a free plan and rejects a session with no plan or any other plan", async () => {
+		const free: RaftPrincipal = { ...principal, plan: "free" };
+		const sealedFree = await sealSession({ principal: free, expiresAt: Date.now() + 60_000 }, SECRET);
+		const openedFree = await openSession(reqWithCookie(sessionCookie(new Request("https://mail.build/"), sealedFree, 60)), SECRET);
+		expect(openedFree?.principal.plan).toBe("free");
+
+		const legacy: RaftPrincipal = { ...principal };
+		delete legacy.plan;
+		const sealedLegacy = await sealSession({ principal: legacy, expiresAt: Date.now() + 60_000 }, SECRET);
+		expect(await openSession(reqWithCookie(sessionCookie(new Request("https://mail.build/"), sealedLegacy, 60)), SECRET)).toBeNull();
+
+		const other = { ...principal, plan: "paid" } as unknown as RaftPrincipal;
+		const sealedOther = await sealSession({ principal: other, expiresAt: Date.now() + 60_000 }, SECRET);
+		expect(await openSession(reqWithCookie(sessionCookie(new Request("https://mail.build/"), sealedOther, 60)), SECRET)).toBeNull();
 	});
 
 	it("round-trips a HUMAN principal with type=human preserved (human session path — never live-run yet)", async () => {
