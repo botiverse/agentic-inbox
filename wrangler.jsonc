@@ -209,10 +209,6 @@
 				"class_name": "EmailAgent"
 			},
 			{
-				"name": "EMAIL_MCP",
-				"class_name": "EmailMCP"
-			},
-			{
 				"name": "OWNER",
 				"class_name": "OwnerDO"
 			}
@@ -241,6 +237,12 @@
 			"tag": "v4",
 			"new_sqlite_classes": [
 				"OwnerDO"
+			]
+		},
+		{
+			"tag": "v5",
+			"deleted_classes": [
+				"EmailMCP"
 			]
 		}
 	]

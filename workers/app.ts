@@ -7,7 +7,6 @@ import { Hono } from "hono";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import { createRequestHandler } from "react-router";
 import { app as apiApp, receiveEmail } from "./index";
-import { EmailMCP } from "./mcp";
 import { resolveKey } from "./lib/keyRegistry";
 import { authApp } from "./routes/auth";
 import type { MailboxContext } from "./lib/mailbox";
@@ -59,7 +58,7 @@ function readRaftConfig(env: Env): RaftOAuthConfig {
 /** A request that should get an HTML redirect (browser nav) vs a JSON 401 (api/programmatic). */
 function wantsHtmlRedirect(request: Request): boolean {
 	const path = new URL(request.url).pathname;
-	if (path.startsWith("/api/") || path.startsWith("/mcp")) return false;
+	if (path.startsWith("/api/")) return false;
 	return (request.headers.get("Accept") ?? "").includes("text/html");
 }
 
@@ -84,7 +83,6 @@ function landingHtml(loginHref: string): string {
 
 export { MailboxDO } from "./durableObject";
 export { EmailAgent } from "./agent";
-export { EmailMCP } from "./mcp";
 export { OwnerDO } from "./ownerDO";
 
 declare module "react-router" {
@@ -318,25 +316,10 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 // ── Login-with-Raft OAuth routes (exempt from the auth middleware above) ──────
 app.route("/", authApp);
 
-// MCP server endpoint — used by AI coding tools (ProtoAgent, Claude Code, Cursor, etc.)
-// Must be before API routes and React Router catch-all
-const mcpHandler = EmailMCP.serve("/mcp", { binding: "EMAIL_MCP" });
-// INTERIM SECURITY GATE: the MCP tools are not yet owner-scoped (verifyMailbox
-// only checks existence, list_mailboxes returns ALL), so any authenticated
-// non-admin caller could enumerate/read other tenants' mailboxes. Restrict /mcp
-// to admin until the per-tool owner-scoping rebuild lands (dogfood: Gogo). /mcp is
-// not advertised in the manifest and not in active agent use, so this is no-impact.
-const mcpAdminOnly = (isAdmin: unknown) => isAdmin === true;
-app.all("/mcp", async (c) => {
-	if (!mcpAdminOnly(c.get("authIsAdmin"))) return c.json({ error: "MCP is temporarily restricted while it is scoped to per-owner access.", code: "FORBIDDEN" }, 403);
-	return mcpHandler.fetch(c.req.raw, c.env, c.executionCtx as ExecutionContext);
-});
-app.all("/mcp/*", async (c) => {
-	if (!mcpAdminOnly(c.get("authIsAdmin"))) return c.json({ error: "MCP is temporarily restricted while it is scoped to per-owner access.", code: "FORBIDDEN" }, 403);
-	return mcpHandler.fetch(c.req.raw, c.env, c.executionCtx as ExecutionContext);
-});
-
 // Mount the API routes
+// /mcp was removed (artin 2026-10-14). The tools only checked that a mailbox
+// existed, so the admin gate was not an auth model. Bring it back only when
+// each tool uses the same owner check as /api.
 app.route("/", apiApp);
 
 // Agent WebSocket routing - must be before React Router catch-all
