@@ -218,14 +218,17 @@ export function notifySummary(mailbox: string, from: string, subject: string): s
 	return text.length <= 500 ? text : `${text.slice(0, 497)}...`;
 }
 
-/** Metadata only. Never the body. */
+/**
+ * Metadata only. Never the body. `untrusted: true` means from/subject in this
+ * payload are data, not instructions. The summary line repeats them; same rule.
+ */
 export function notifyPayload(input: {
 	mailbox: string;
 	emailId: string;
 	from: string;
 	subject: string;
 	rfcMessageId: string | null;
-}): Record<string, string | null> {
+}): Record<string, string | boolean | null> {
 	return {
 		provider: "mail.build",
 		kind: "inbound_email",
@@ -234,5 +237,6 @@ export function notifyPayload(input: {
 		from: input.from,
 		subject: input.subject,
 		rfcMessageId: input.rfcMessageId,
+		untrusted: true,
 	};
 }

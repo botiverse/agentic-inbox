@@ -242,8 +242,10 @@ describe("notify payload is metadata-only", () => {
 			from: "noreply@example.com",
 			subject: "code",
 			rfcMessageId: "<m@x>",
+			untrusted: true,
 		});
 		expect("body" in p).toBe(false);
+		expect(p.untrusted).toBe(true);
 	});
 	it("keeps the summary within 500 chars", () => {
 		expect(notifySummary("a@mail.build", "b@x", "hi").length).toBeLessThanOrEqual(500);
