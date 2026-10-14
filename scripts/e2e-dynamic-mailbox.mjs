@@ -20,7 +20,8 @@
 // E2E runs occasional, not per-commit.
 //
 // Usage:
-//   AGENTIC_INBOX_TOKEN=sk_aibx_... MAILS_DEV_API_KEY=mk_... npm run e2e
+//   AGENTIC_INBOX_SESSION='agentic_inbox_session=...' MAILS_DEV_API_KEY=mk_... npm run e2e
+// The session is a Login-with-Raft cookie. Bearer API keys are not accepted.
 // Optional env:
 //   AGENTIC_INBOX_URL   (default https://agentic-inbox.botiverse.workers.dev)
 //   MAILS_DEV_SEND_URL  (default https://api.mails.dev/v1/send)
@@ -30,7 +31,7 @@
 //   E2E_POLL_MS         (default 5000)
 
 const BASE = (process.env.AGENTIC_INBOX_URL || "https://agentic-inbox.botiverse.workers.dev").replace(/\/$/, "");
-const TOKEN = process.env.AGENTIC_INBOX_TOKEN;
+const SESSION = process.env.AGENTIC_INBOX_SESSION;
 const MAILS_KEY = process.env.MAILS_DEV_API_KEY;
 const MAILS_SEND_URL = process.env.MAILS_DEV_SEND_URL || "https://api.mails.dev/v1/send";
 const DOMAIN = process.env.E2E_DOMAIN || "mail.build";
@@ -38,9 +39,13 @@ const NS = process.env.E2E_NAMESPACE || "postel-e2e";
 const TIMEOUT_MS = Number(process.env.E2E_TIMEOUT_MS || 120000);
 const POLL_MS = Number(process.env.E2E_POLL_MS || 5000);
 
-if (!TOKEN) {
-	console.error("FATAL: AGENTIC_INBOX_TOKEN is required (the agentic-inbox API key).");
+if (!SESSION) {
+	console.error("FATAL: AGENTIC_INBOX_SESSION is required (Login-with-Raft cookie agentic_inbox_session=...).");
 	process.exit(2);
+}
+function sessionCookie() {
+	const s = SESSION.trim();
+	return s.includes("=") ? s : `agentic_inbox_session=${s}`;
 }
 if (!MAILS_KEY) {
 	console.error("FATAL: MAILS_DEV_API_KEY is required (external sender for the inbound probe).");
@@ -53,7 +58,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function api(method, path, body) {
 	const res = await fetch(`${BASE}${path}`, {
 		method,
-		headers: { Authorization: `Bearer ${TOKEN}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+		headers: { Cookie: sessionCookie(), ...(body ? { "Content-Type": "application/json" } : {}) },
 		body: body ? JSON.stringify(body) : undefined,
 	});
 	const text = await res.text();

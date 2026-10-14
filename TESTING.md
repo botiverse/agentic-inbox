@@ -41,7 +41,7 @@ mailbox receives a **real external email** end-to-end (mails.dev → CF Email
 Routing catch-all → `receiveEmail` → inbox) with **no redeploy** — and cleans up.
 
 ```bash
-AGENTIC_INBOX_TOKEN=sk_aibx_... MAILS_DEV_API_KEY=mk_... npm run e2e
+AGENTIC_INBOX_SESSION='agentic_inbox_session=...' MAILS_DEV_API_KEY=mk_... npm run e2e
 ```
 
 Optional env: `AGENTIC_INBOX_URL`, `MAILS_DEV_SEND_URL` (default

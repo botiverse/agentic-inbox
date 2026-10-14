@@ -27,7 +27,7 @@ import { runInboundNotify } from "./lib/agentEvents";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
 import { maxMailboxesForPlan, planForOwner, getPlanForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart } from "./lib/auth";
-import { mintKey, mintToken, recordOwnedMailbox, removeOwnedMailbox, rotateKey, listOwnerKeys, revokeOwnerKey, keyGuidance } from "./lib/keyRegistry";
+import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -140,8 +140,8 @@ app.use("/api/*", cors({
 }));
 app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 // Also guard the bare single-mailbox routes (GET/PUT settings, DELETE) — the
-// `/*` pattern above only matches sub-paths, so without this a scoped-key caller
-// could read/modify/delete a mailbox they don't own.
+// `/*` pattern above only matches sub-paths, so without this a caller could
+// read/modify/delete a mailbox they don't own.
 app.use("/api/v1/mailboxes/:mailboxId", requireMailbox);
 
 // -- Config ---------------------------------------------------------
@@ -229,7 +229,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 		return c.json({ error: `Mailbox local-part must be ASCII (letters, digits, . _ -).${nsHint}`, code: "INVALID_LOCALPART", namespace: namespace || undefined }, 400);
 	}
 
-	// Claim requires an authenticated owner (agent scoped key or human session).
+	// Claim requires an authenticated owner (Login with Raft session).
 	const owner = c.get("authOwner");
 	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
 	const isAdmin = c.get("authIsAdmin") === true;
@@ -326,16 +326,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// is the count+list authority).
 	await recordOwnedMailbox(c.env, owner, email, displayName);
 
-	// Mint a mailbox-scoped access key — returned ONCE (finest isolation: this
-	// key can only touch this one mailbox).
-	const token = mintToken();
-	const { hash: keyId } = await mintKey(c.env, { owner, scope: email, token, label: `mailbox ${email}`, now: new Date().toISOString() });
-
-	// Never hand out a bare credential — ship onboarding guidance with the key.
-	// `keyId` is the handle for revoke (DELETE .../keys/{id}) so the caller can
-	// revoke the key it just got in one step, without a list-keys round-trip
-	// (AX: HuangSong — claim/rotate returned the raw key but not its id).
-	return c.json({ id: email, email, name: displayName, owner, settings: finalSettings, key: token, keyId, key_guidance: keyGuidance(email), adopted: adopting || undefined }, adopting ? 200 : 201);
+	return c.json({ id: email, email, name: displayName, owner, settings: finalSettings, adopted: adopting || undefined }, adopting ? 200 : 201);
 });
 
 app.get("/api/v1/mailboxes/:mailboxId", async (c) => {
@@ -377,41 +368,6 @@ app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
 		await ownerStub.release(owner, mailboxId);
 		await removeOwnedMailbox(c.env, owner, mailboxId);
 	}
-	return c.body(null, 204);
-});
-
-// -- Mailbox access keys (rotate / list / revoke) -------------------
-// All under requireMailbox, so the caller must own :mailboxId. Keys are scoped to
-// the mailbox; the raw token is only ever returned once (mint/rotate).
-
-// Rotate the mailbox key: mint a fresh one (returned once) + revoke the old.
-app.post("/api/v1/mailboxes/:mailboxId/keys/rotate", async (c: AppContext) => {
-	const mailboxId = c.req.param("mailboxId")!;
-	const owner = c.get("authOwner");
-	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
-	const token = mintToken();
-	const { hash: keyId, revoked } = await rotateKey(c.env, { owner, scope: mailboxId, token, label: `mailbox ${mailboxId}`, now: new Date().toISOString() });
-	// Return `keyId` so the new key can be revoked in one step (no list-keys hop).
-	return c.json({ id: mailboxId, email: mailboxId, key: token, keyId, key_guidance: keyGuidance(mailboxId), revoked }, 201);
-});
-
-// List this mailbox's key metadata — NEVER the raw token.
-app.get("/api/v1/mailboxes/:mailboxId/keys", async (c: AppContext) => {
-	const mailboxId = c.req.param("mailboxId")!;
-	const owner = c.get("authOwner");
-	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
-	const keys = await listOwnerKeys(c.env, owner, mailboxId);
-	return c.json({ keys });
-});
-
-// Revoke a specific key of this mailbox (owner-scoped by keyId).
-app.delete("/api/v1/mailboxes/:mailboxId/keys/:keyId", async (c: AppContext) => {
-	const owner = c.get("authOwner");
-	if (!owner) return c.json({ error: "Authentication required", code: "AUTH_REQUIRED" }, 401);
-	// Pass the path mailbox as the expected scope so this route only revokes THIS
-	// mailbox's key (path-scope consistency), not another mailbox's key.
-	const ok = await revokeOwnerKey(c.env, owner, c.req.param("keyId")!, c.req.param("mailboxId")!);
-	if (!ok) return c.json({ error: "Key not found", code: "NOT_FOUND" }, 404);
 	return c.body(null, 204);
 });
 

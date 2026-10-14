@@ -5,24 +5,15 @@
 /**
  * Per-agent auth + mailbox ownership primitives (pure logic).
  *
- * Identity layer: API keys are stored hashed in KV (keyHash -> {accountId,...}).
- * Ownership layer: each mailbox carries an `owner` (an accountId); API access is
- * scoped to the owner. Receiving is NOT owner-gated. The `<handle>` and
+ * Identity is a Login-with-Raft session. Each mailbox carries an `owner`
+ * (an accountId); API access is scoped to that owner. Receiving is NOT
+ * owner-gated. The `<handle>` and
  * `<handle>-*` local-part prefixes are reserved to the matching account to
  * prevent identity squatting.
  *
  * These functions are pure so they can be unit-tested without KV/bindings; the
- * registry lookups (does a key exist? is a handle owned by someone else?) are
- * performed by the caller and passed in as plain values.
+ * caller passes ownership facts in as plain values.
  */
-
-/** SHA-256 hex of a raw API key. Keys are only ever stored/compared hashed. */
-export async function hashApiKey(raw: string): Promise<string> {
-	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
-	return Array.from(new Uint8Array(digest))
-		.map((b) => b.toString(16).padStart(2, "0"))
-		.join("");
-}
 
 /**
  * Whether a caller may access (read/send/manage/delete) a mailbox.
@@ -52,10 +43,10 @@ export function reservedHandleForAddress(address: string): string {
 	return reservedHandleForLocalPart(address.toLowerCase().split("@")[0] ?? "");
 }
 
-// ── 3-resource model: Owner / Mailbox / Access Key ────────────────
-// (locked 2026-07-12) Ownership modeled by Owner; access credential scoped by
-// resource. A key's scope is either a specific mailbox id, the whole account,
-// or admin (all).
+// ── Owner / Mailbox access ─────────────────────────────────────────
+// Ownership modeled by Owner. A Raft session presents scope "account".
+// scope "admin" or a single mailbox id stay in the decision function;
+// the auth middleware does not issue them.
 
 export type KeyScope = string; // a mailboxId, or "account", or "admin"
 
@@ -70,7 +61,7 @@ export interface MailboxRef {
 }
 
 /**
- * Whether an access key authorizes an operation on a mailbox.
+ * Whether this caller may operate on a mailbox.
  * - `admin` scope → any mailbox.
  * - otherwise the caller must OWN the mailbox, AND
  *   - `account` scope → any mailbox the owner holds;

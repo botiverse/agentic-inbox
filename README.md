@@ -78,6 +78,8 @@ npm run deploy
 
 There is no `/mcp` endpoint. It was removed because its tools were not owner-scoped. Mailbox access goes through the HTTP API, which checks the authenticated owner.
 
+Authentication is Login with Raft. The worker does not accept an API key.
+
 ## Architecture
 
 ```

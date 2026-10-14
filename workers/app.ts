@@ -7,7 +7,6 @@ import { Hono } from "hono";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import { createRequestHandler } from "react-router";
 import { app as apiApp, receiveEmail } from "./index";
-import { resolveKey } from "./lib/keyRegistry";
 import { authApp } from "./routes/auth";
 import type { MailboxContext } from "./lib/mailbox";
 import type { Env } from "./types";
@@ -139,23 +138,11 @@ app.use("*", async (c, next) => {
 		return next();
 	}
 
-	const bearer = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "");
-
-	// 1. Per-agent scoped key (Bearer) — programmatic agent access.
-	if (bearer) {
-		const key = await resolveKey(c.env, bearer);
-		if (key) {
-			c.set("authOwner", key.owner);
-			c.set("authScope", key.scope);
-			c.set("authIsAdmin", key.scope === "admin");
-			return next();
-		}
-	}
-
-	// 2. Login-with-Raft session (cookie) — human or agent signed in via OAuth.
-	//    The server allow-list (botiverse-only) was enforced ONCE at login in
-	//    validateRaftPrincipal; a sealed session is proof of that, so we trust the
-	//    owner here and do NOT re-check the server per request.
+	// Login-with-Raft session (cookie) is the only identity. A Bearer token is
+	// not a login: mailbox keys and the legacy global API key are not accepted.
+	// The server allow-list was enforced ONCE at login in validateRaftPrincipal;
+	// a sealed session is proof of that, so we trust the owner here and do NOT
+	// re-check the server per request.
 	if (c.env.RAFT_SESSION_SECRET) {
 		const session = await openSession(c.req.raw, c.env.RAFT_SESSION_SECRET);
 		if (session) {
@@ -168,17 +155,7 @@ app.use("*", async (c, next) => {
 		}
 	}
 
-	// 3. Legacy global API_KEY — temporary admin fallback during cutover (removed
-	//    once all consumers hold scoped keys). See notes/design-per-agent-auth.md #2.
-	const apiKey = c.env.API_KEY;
-	if (apiKey && bearer === apiKey) {
-		c.set("authOwner", "local:admin");
-		c.set("authScope", "admin");
-		c.set("authIsAdmin", true);
-		return next();
-	}
-
-	// 4a. No identity, Login-with-Raft configured (mail.build): raft-login is the
+	// No identity, Login-with-Raft configured (mail.build): raft-login is the
 	//     gate. JSON 401 for api/programmatic; browsers get the landing page (with a
 	//     "Login with Raft" CTA) instead of bouncing straight into OAuth (tygg).
 	if (raftLoginConfigured(c.env)) {
@@ -189,7 +166,7 @@ app.use("*", async (c, next) => {
 		return c.json({ error: "Authentication required" }, 401);
 	}
 
-	// 4b. Legacy Cloudflare Access gate (workers.dev) — only active when configured
+	// Legacy Cloudflare Access gate (workers.dev) — only active when configured
 	//     and raft-login is not. Inert on mail.build (POLICY_AUD/TEAM_DOMAIN unset).
 	const { POLICY_AUD, TEAM_DOMAIN } = c.env;
 	if (!POLICY_AUD || !TEAM_DOMAIN) {
@@ -235,7 +212,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 			actions: [
 				{
 					name: "claim-mailbox",
-					description: "Claim a mailbox. REQUIRED body: {email, name}. `email` = the full address `<yourhandle>@mail.build` (local-part must be ASCII and under your own handle namespace — `<handle>@` or `<handle>-*@`, e.g. `postel@mail.build` or `postel-ci@mail.build`); `name` = a display name. If your handle is non-ASCII (e.g. CJK), you cannot use it directly in an address — claim under your DERIVED namespace instead; the 400/403 error returns your exact claimable `namespace` (an `a-<hash>@mail.build`). If the address already exists but is ownerless it is adopted (you become the owner). Returns a mailbox-scoped access key + its `keyId` (use keyId to revoke), shown once — raft-native (integration) calls authenticate via your stored session and do NOT need this key.",
+					description: "Claim a mailbox. REQUIRED body: {email, name}. `email` = the full address `<yourhandle>@mail.build` (local-part must be ASCII and under your own handle namespace — `<handle>@` or `<handle>-*@`, e.g. `postel@mail.build` or `postel-ci@mail.build`); `name` = a display name. If your handle is non-ASCII (e.g. CJK), you cannot use it directly in an address — claim under your DERIVED namespace instead; the 400/403 error returns your exact claimable `namespace` (an `a-<hash>@mail.build`). If the address already exists but is ownerless it is adopted (you become the owner). Authentication is the Login-with-Raft session only; this response does not include an API key.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes" },
 					body: {
 						email: "string (required) — the address to claim, e.g. <handle>@mail.build",
@@ -261,21 +238,6 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 					name: "release-mailbox",
 					description: "Release (delete) a mailbox you own, freeing the quota slot so you can claim another. Use this to clean up throwaway / verification mailboxes.",
 					endpoint: { method: "DELETE", path: "/api/v1/mailboxes/{mailboxId}" },
-				},
-				{
-					name: "rotate-mailbox-key",
-					description: "Rotate the access key for a mailbox you own: mints a fresh key (returned ONCE in `key`, with `key_guidance`) and invalidates the previous one. Use this if a key is lost or leaked. Note: raft-native calls don't need the key at all (stored session).",
-					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/keys/rotate" },
-				},
-				{
-					name: "list-mailbox-keys",
-					description: "List key metadata for a mailbox you own (id / scope / label / createdAt / disabled) — never the raw key. Use the id with revoke.",
-					endpoint: { method: "GET", path: "/api/v1/mailboxes/{mailboxId}/keys" },
-				},
-				{
-					name: "revoke-mailbox-key",
-					description: "Revoke a specific key of a mailbox you own (by the id from list-mailbox-keys).",
-					endpoint: { method: "DELETE", path: "/api/v1/mailboxes/{mailboxId}/keys/{keyId}" },
 				},
 				{
 					name: "send-mail",
