@@ -17,9 +17,10 @@ import {
 import { SendEmailRequestSchema } from "../lib/schemas";
 import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
+import { flagContext, sendRateLimits } from "../lib/flags";
 
 type AppContext = Context<MailboxContext>;
-type RateLimitStub = { checkSendRateLimit: () => Promise<string | null> };
+type RateLimitStub = { checkSendRateLimit: (limits?: { perHour: number; perDay: number }) => Promise<string | null> };
 
 export async function handleReplyEmail(c: AppContext) {
 	const mailboxId = c.req.param("mailboxId") ?? "";
@@ -47,8 +48,9 @@ export async function handleReplyEmail(c: AppContext) {
 
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 
+	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), mailboxId));
 	const rateLimitError = await (stub as unknown as RateLimitStub)
-		.checkSendRateLimit();
+		.checkSendRateLimit(rateLimits);
 	if (rateLimitError) {
 		return c.json({ error: rateLimitError }, 429);
 	}
@@ -137,8 +139,9 @@ export async function handleForwardEmail(c: AppContext) {
 
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 
+	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), mailboxId));
 	const rateLimitError = await (stub as unknown as RateLimitStub)
-		.checkSendRateLimit();
+		.checkSendRateLimit(rateLimits);
 	if (rateLimitError) {
 		return c.json({ error: rateLimitError }, 429);
 	}

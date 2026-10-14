@@ -26,7 +26,8 @@ import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, read
 import { runInboundNotify } from "./lib/agentEvents";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
-import { maxMailboxesForPlan, planForOwner, getPlanForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart } from "./lib/auth";
+import { getPlanForOwner, claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidAsciiLocalPart, serverIdFromOwner } from "./lib/auth";
+import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDomains } from "./lib/flags";
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { Folders } from "../shared/folders";
@@ -306,7 +307,9 @@ app.post("/api/v1/mailboxes", async (c) => {
 	// kv.list count lagged ~60s and let a 3rd mailbox through on free=1). Admin
 	// gets an effectively unlimited allowance but is still recorded.
 	const plan = await getPlanForOwner(owner, parseDomains(c.env.PRO_SERVER_IDS), c.env.FLAGS);
-	const limit = isAdmin ? Number.MAX_SAFE_INTEGER : maxMailboxesForPlan(plan);
+	const limit = isAdmin
+		? Number.MAX_SAFE_INTEGER
+		: await mailboxQuotaLimit(c.env.FLAGS, plan, serverIdFromOwner(owner));
 	const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
 	const reservation = await ownerStub.reserve(owner, email, displayName, limit);
 	if (!reservation.ok) {
@@ -424,7 +427,8 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 	const stub = c.var.mailboxStub;
-	const rateLimitError = await (stub as any).checkSendRateLimit();
+	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), mailboxId));
+	const rateLimitError = await (stub as any).checkSendRateLimit(rateLimits);
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
@@ -495,7 +499,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	// lets us prove alignment on a controlled recipient before every agent can mail
 	// anyone. Widen it once the first real Authentication-Results comes back clean.
 	const isInternal = isAddressAllowed(to, (c.env.EMAIL_ADDRESSES ?? []) as string[], parseDomains(c.env.DOMAINS));
-	const externalDomains = parseDomains(c.env.EXTERNAL_SEND_DOMAINS);
+	const externalDomains = await resolveExternalSendDomains(c.env.FLAGS, c.env.EXTERNAL_SEND_DOMAINS, flagContext(c.get("authOwner"), from));
 	const toDomain = to.split("@")[1] ?? "";
 	if (!isInternal && !externalDomains.includes(toDomain)) {
 		return c.json({
@@ -520,7 +524,8 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	if (isInternal && !(await mailboxExists(c.env, toMailbox))) {
 		return c.json({ error: `Recipient mailbox does not exist: ${toMailbox}`, code: "NOT_FOUND" }, 404);
 	}
-	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit();
+	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), from));
+	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit(rateLimits);
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
 
 	const subject = (reqBody.subject || "").toString();

@@ -29,6 +29,7 @@ import {
 import { verifyDraft } from "./ai";
 import { sendEmail } from "../email-sender";
 import { Folders } from "../../shared/folders";
+import { flagContext, sendRateLimits } from "./flags";
 import type { Env } from "../types";
 
 // ── Type casts for DO methods not on the base stub type ────────────
@@ -40,7 +41,7 @@ type MailboxSearchStub = {
 };
 
 type RateLimitStub = {
-	checkSendRateLimit: () => Promise<string | null>;
+	checkSendRateLimit: (limits?: { perHour: number; perDay: number }) => Promise<string | null>;
 };
 
 // ── list_mailboxes ─────────────────────────────────────────────────
@@ -405,8 +406,8 @@ export async function toolSendReply(
 > {
 	const stub = getMailboxStub(env, mailboxId);
 
-	// Check send rate limit
-	const rateLimitError = await (stub as unknown as RateLimitStub).checkSendRateLimit();
+	const rateLimits = await sendRateLimits(env.FLAGS, flagContext(undefined, mailboxId));
+	const rateLimitError = await (stub as unknown as RateLimitStub).checkSendRateLimit(rateLimits);
 	if (rateLimitError) {
 		return { error: rateLimitError };
 	}
@@ -483,8 +484,8 @@ export async function toolSendEmail(
 > {
 	const stub = getMailboxStub(env, mailboxId);
 
-	// Check send rate limit
-	const rateLimitError = await (stub as unknown as RateLimitStub).checkSendRateLimit();
+	const rateLimits = await sendRateLimits(env.FLAGS, flagContext(undefined, mailboxId));
+	const rateLimitError = await (stub as unknown as RateLimitStub).checkSendRateLimit(rateLimits);
 	if (rateLimitError) {
 		return { error: rateLimitError };
 	}
