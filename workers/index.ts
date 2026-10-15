@@ -30,6 +30,8 @@ import { claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidA
 import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDomains } from "./lib/flags";
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
+import { checkSendPlan, reserveAccountSend } from "./lib/sendPolicy";
+import { MIN_MAILBOX_LOCAL_PART_LENGTH } from "../shared/mailPolicy";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
 import { requireMailbox, type MailboxContext } from "./lib/mailbox";
@@ -144,6 +146,14 @@ app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 // `/*` pattern above only matches sub-paths, so without this a caller could
 // read/modify/delete a mailbox they don't own.
 app.use("/api/v1/mailboxes/:mailboxId", requireMailbox);
+// All public send paths share the same plan gate; ownership is checked first.
+app.use("/api/v1/mailboxes/:mailboxId/*", async (c, next) => {
+	if (c.req.method === "POST" && /^\/api\/v1\/mailboxes\/[^/]+\/(?:send|emails|emails\/[^/]+\/(?:reply|forward))$/.test(c.req.path)) {
+		const denied = checkSendPlan(c);
+		if (denied) return denied;
+	}
+	await next();
+});
 
 // -- Config ---------------------------------------------------------
 
@@ -288,6 +298,16 @@ app.post("/api/v1/mailboxes", async (c) => {
 		// action === "adopt": fall through.
 	}
 
+	// Keep existing owned short addresses usable, but reject new claims/adoptions.
+	if (localPart.length < MIN_MAILBOX_LOCAL_PART_LENGTH) {
+		return c.json({
+			code: "LOCALPART_TOO_SHORT",
+			error: `New mailbox names must have at least ${MIN_MAILBOX_LOCAL_PART_LENGTH} characters before @. Use a longer suffix within your namespace.`,
+			minLength: MIN_MAILBOX_LOCAL_PART_LENGTH,
+			namespace: namespace || undefined,
+		}, 400);
+	}
+
 	const adopting = existingSettings !== null;
 	const defaultSettings = { fromName: name, forwarding: { enabled: false, email: "" }, signature: { enabled: false, text: "" }, autoReply: { enabled: false, subject: "", message: "" } };
 	// Adoption preserves the existing mailbox settings (and its stored mail);
@@ -430,6 +450,8 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), mailboxId));
 	const rateLimitError = await (stub as any).checkSendRateLimit(rateLimits);
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
+	const sendDenied = await reserveAccountSend(c);
+	if (sendDenied) return sendDenied;
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
 	await stub.createEmail(Folders.SENT, {
@@ -527,6 +549,8 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), from));
 	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit(rateLimits);
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
+	const sendDenied = await reserveAccountSend(c);
+	if (sendDenied) return sendDenied;
 
 	const subject = (reqBody.subject || "").toString();
 	const content = (reqBody.html || reqBody.text || "").toString();

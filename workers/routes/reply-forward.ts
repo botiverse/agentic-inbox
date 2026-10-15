@@ -18,6 +18,7 @@ import { SendEmailRequestSchema } from "../lib/schemas";
 import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
 import { flagContext, sendRateLimits } from "../lib/flags";
+import { reserveAccountSend } from "../lib/sendPolicy";
 
 type AppContext = Context<MailboxContext>;
 type RateLimitStub = { checkSendRateLimit: (limits?: { perHour: number; perDay: number }) => Promise<string | null> };
@@ -54,6 +55,9 @@ export async function handleReplyEmail(c: AppContext) {
 	if (rateLimitError) {
 		return c.json({ error: rateLimitError }, 429);
 	}
+
+	const sendDenied = await reserveAccountSend(c);
+	if (sendDenied) return sendDenied;
 
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
@@ -145,6 +149,9 @@ export async function handleForwardEmail(c: AppContext) {
 	if (rateLimitError) {
 		return c.json({ error: rateLimitError }, 429);
 	}
+
+	const sendDenied = await reserveAccountSend(c);
+	if (sendDenied) return sendDenied;
 
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 

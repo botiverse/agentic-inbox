@@ -1,5 +1,19 @@
 import { describe, it, expect } from "vitest";
 import { app, receiveEmail } from "./index";
+import { Hono } from "hono";
+import type { MailboxContext } from "./lib/mailbox";
+
+// Routing tests use an authenticated Pro account; account-quota behavior is
+// covered separately with shared admission state in sendPolicy.test.ts.
+function requestAsPro(path: string, init: RequestInit, env: unknown) {
+	const api = new Hono<MailboxContext>();
+	api.use("*", async (c, next) => { c.set("authOwner", "test"); c.set("authScope", "account"); c.set("authPlan", "pro"); await next(); });
+	api.route("/", app);
+	return api.request(path, init, { ...(env as object), OWNER: {
+		idFromName: (id: string) => id, get: () => ({ reserveSend: async () => ({ ok: true, retryAt: 0 }) }),
+	} } as never);
+}
+
 
 // These hit the mailbox-create validation path, which returns before any
 // Cloudflare binding (R2/DO) is touched — so they run in plain Node with an
@@ -245,7 +259,7 @@ describe("internal send resolves a +tag recipient to its base mailbox", () => {
 				}),
 			},
 		} as never;
-		const res = await app.request(
+		const res = await requestAsPro(
 			`/api/v1/mailboxes/postel@mail.build/send`,
 			{
 				method: "POST",
@@ -292,7 +306,7 @@ describe("send routing: internal / allow-listed external / refused", () => {
 			BUCKET: {
 				head: async (k: string) => (k === "mailboxes/postel@mail.build.json" ? {} : null),
 				get: async (k: string) =>
-					k === "mailboxes/postel@mail.build.json" ? { json: async () => ({ owner: "t" }) } : null,
+					k === "mailboxes/postel@mail.build.json" ? { json: async () => ({ owner: "test" }) } : null,
 			},
 			MAILBOX: {
 				idFromName: (n: string) => n,
@@ -308,7 +322,7 @@ describe("send routing: internal / allow-listed external / refused", () => {
 		return { e, sent, stored };
 	}
 	async function send(to: string, envObj: never) {
-		return app.request("/api/v1/mailboxes/postel@mail.build/send", {
+		return requestAsPro("/api/v1/mailboxes/postel@mail.build/send", {
 			method: "POST", headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ to, subject: "s", text: "t" }),
 		}, envObj);

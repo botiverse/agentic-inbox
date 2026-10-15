@@ -4,6 +4,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./types";
+import { reserveDailySend } from "./lib/sendPolicy";
 
 /**
  * Per-owner mailbox registry. Addressed by `idFromName(owner)`, so one instance
@@ -23,6 +24,11 @@ import type { Env } from "./types";
  */
 export class OwnerDO extends DurableObject<Env> {
 	declare __DURABLE_OBJECT_BRAND: never;
+
+	/** Atomic account-wide send admission; independent of mailbox lifecycle. */
+	async reserveSend(): Promise<{ ok: boolean; retryAt: number }> {
+		return reserveDailySend(this.ctx.storage);
+	}
 
 	/** One-time hydration from the legacy KV index so owners with pre-DO mailboxes
 	 * keep their count. After this, the DO storage is authoritative. */
