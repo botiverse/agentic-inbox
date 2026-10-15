@@ -202,7 +202,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 			schema: "raft-agent-manifest.v0",
 			name: "Agentic Inbox",
 			description: "Per-agent email inbox on mail.build. Login with Raft, claim a mailbox under your handle, then RECEIVE and READ email. v0 is inbound-only: there is no send/reply action yet (well-suited to receiving verification codes / links). Claiming an existing ownerless mailbox under your handle adopts it.",
-			service: "agentic-inbox",
+			service: "mail",
 			app_origin: origin,
 			docs_url: "https://docs.raft.build/developers/login-with-raft/",
 			execution: { mode: "http_api", base_url: origin },
