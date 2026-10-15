@@ -471,7 +471,7 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 			date: sentAt,
 			inReplyTo: in_reply_to || "",
 			references: references ? JSON.stringify(references) : "",
-			threadId: thread_id || in_reply_to || messageId,
+			threadId: (thread_id || in_reply_to) && (thread_id || in_reply_to) !== messageId ? (thread_id || in_reply_to) : "",
 			messageId: outgoingMessageId,
 			rawHeaders: sentHeaders,
 		}),

@@ -5,7 +5,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./types";
 import { mailboxStub } from "./lib/mailboxRef";
-import { releaseStoredBytes, reserveStoredBytes, type StorageAdmission } from "./lib/storageQuota";
+import { reserveStoredBytes, type StorageAdmission } from "./lib/storageQuota";
 
 /**
  * Per-owner mailbox registry. Addressed by `idFromName(owner)`, so one instance
@@ -183,49 +183,78 @@ export class OwnerDO extends DurableObject<Env> {
 		return reserveStoredBytes(this.ctx.storage, bytes, limit);
 	}
 
+	/** Bytes currently stored across this owner's mailboxes. Throws if a read fails. */
+	private async measuredUsage(owner: string): Promise<number> {
+		const map = (await this.ctx.storage.get<Record<string, string>>("mailboxes")) ?? {};
+		let total = 0;
+		for (const email of this.addressesFor(owner, map)) total += await this.mailboxUsage(email);
+		return total;
+	}
+
 	/**
-	 * Return bytes after a user delete. Existing mail is never removed here.
-	 * A snapshot taken by this call, or by another call that raced it before
-	 * the snapshot existed, already excludes rows deleted ahead of the scan.
-	 * Subtracting on top of that snapshot would credit the same bytes twice.
-	 * A release that starts after the snapshot exists subtracts exactly once.
+	 * Return bytes after a delete or a cancelled hold.
+	 * The counter may fall only as far as the bytes still stored. A refund that
+	 * arrives after a seed already taken from the post-delete mailbox therefore
+	 * subtracts nothing. A later delete, whose bytes the counter still includes,
+	 * subtracts once, down to the new measured total.
 	 */
 	async releaseStorage(owner: string, bytes: number): Promise<{ used: number }> {
 		await this.sweepOrphans();
-		const boot = await this.ensureUsage(owner);
-		if (boot === "seeded" || boot === "joined") {
-			return { used: Number((await this.ctx.storage.get<number>("storage:used")) ?? 0) };
-		}
-		return releaseStoredBytes(this.ctx.storage, bytes);
+		await this.ensureUsage(owner);
+		const actual = await this.measuredUsage(owner);
+		const requested = Math.max(0, Math.floor(bytes));
+		return this.ctx.storage.transaction(async (tx) => {
+			const used = Number((await tx.get<number>("storage:used")) ?? 0);
+			const excess = Math.max(0, used - actual);
+			const next = used - Math.min(requested, excess);
+			if (next !== used) await tx.put("storage:used", next);
+			return { used: next };
+		});
 	}
 
 	/** Remember object keys whose bytes stayed charged because delete was not confirmed. */
 	async retainOrphans(keys: string[], bytes: number): Promise<void> {
 		if (keys.length === 0 || bytes <= 0) return;
-		const pending = (await this.ctx.storage.get<Array<{ keys: string[]; bytes: number }>>("storage:orphans")) ?? [];
-		pending.push({ keys, bytes });
-		await this.ctx.storage.put("storage:orphans", pending);
+		const record = { id: crypto.randomUUID(), keys, bytes: Math.floor(bytes) };
+		await this.ctx.storage.transaction(async (tx) => {
+			const pending = (await tx.get<OrphanRecord[]>("storage:orphans")) ?? [];
+			pending.push(record);
+			await tx.put("storage:orphans", pending);
+		});
 	}
 
-	/** Retry orphan deletes. A confirmed delete refunds those bytes once. */
+	/**
+	 * Retry orphan deletes. R2 delete may run twice; the credit runs once.
+	 * The record is removed in the same transaction as its refund, matched by id,
+	 * so a second sweeper cannot refund it and an append during the delete is kept.
+	 */
 	private async sweepOrphans(): Promise<void> {
 		const bucket = this.env.BUCKET;
 		if (!bucket) return;
-		const pending = (await this.ctx.storage.get<Array<{ keys: string[]; bytes: number }>>("storage:orphans")) ?? [];
+		const pending = (await this.ctx.storage.get<OrphanRecord[]>("storage:orphans")) ?? [];
 		if (pending.length === 0) return;
-		const remain: Array<{ keys: string[]; bytes: number }> = [];
-		let refund = 0;
 		for (const item of pending) {
 			try {
 				await bucket.delete(item.keys);
-				refund += item.bytes;
 			} catch {
-				remain.push(item);
+				continue;
 			}
-		}
-		await this.ctx.storage.put("storage:orphans", remain);
-		if (refund > 0 && (await this.ctx.storage.get("storage:seeded"))) {
-			await releaseStoredBytes(this.ctx.storage, refund);
+			const id = item.id || item.keys.join("\0");
+			await this.ctx.storage.transaction(async (tx) => {
+				if (!(await tx.get("storage:seeded"))) return;
+				const current = (await tx.get<OrphanRecord[]>("storage:orphans")) ?? [];
+				const idx = current.findIndex((row) => (row.id || row.keys.join("\0")) === id);
+				if (idx < 0) return;
+				const credit = Math.max(0, Math.floor(current[idx]?.bytes ?? 0));
+				current.splice(idx, 1);
+				await tx.put("storage:orphans", current);
+				if (credit <= 0) return;
+				const used = Number((await tx.get<number>("storage:used")) ?? 0);
+				const next = Math.max(0, used - credit);
+				if (next !== used) await tx.put("storage:used", next);
+			});
 		}
 	}
 }
+
+type OrphanRecord = { id?: string; keys: string[]; bytes: number };

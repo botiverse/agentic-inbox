@@ -206,7 +206,7 @@ export async function handleForwardEmail(c: AppContext) {
 			size: atob(att.content).length, filename: att.filename, mimetype: att.type, contentId: att.contentId, disposition: att.disposition,
 		}), 0), subject, {
 			sender: fromEmail, recipient: toStr, cc: ccStored, bcc: bccStored, date: sentAt,
-			threadId: messageId, messageId: outgoingMessageId, rawHeaders: forwardHeaders,
+			messageId: outgoingMessageId, rawHeaders: forwardHeaders,
 		}),
 	);
 	if (!held.ok) return storageQuotaResponse(held);

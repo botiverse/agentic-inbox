@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { releaseStoredBytes, reserveStoredBytes, STORAGE_QUOTA_FREE_BYTES, storageLimitBytes, storedMailBytes } from "./storageQuota";
+import { releaseStoredBytes, reserveStoredBytes, STORAGE_QUOTA_FREE_BYTES, storageLimitBytes, storedMailBytes, storedRowBytes } from "./storageQuota";
 
 function durableStorage(initial = 0) {
 	const values = new Map<string, unknown>([["storage:used", initial]]);
@@ -27,7 +27,9 @@ describe("stored mail bytes", () => {
 		expect(storedMailBytes("你", 0)).toBe(3);
 		expect(storedMailBytes("", 0, "x".repeat(1000))).toBe(1000);
 		expect(storedMailBytes("", 0, "", { recipient: "x".repeat(1000) })).toBe(1000);
-		expect(storedMailBytes("body", 0, "", { sender: "box@mail.build", threadId: "x".repeat(36) })).toBe(4);
+		expect(storedMailBytes("body", 0, "", { sender: "box@mail.build", threadId: "x".repeat(36) })).toBe(40);
+		expect(storedRowBytes({ id: "same", body: "body", thread_id: "same" })).toBe(4);
+		expect(storedRowBytes({ id: "row", body: "", thread_id: "x".repeat(36) })).toBe(36);
 		expect(storageLimitBytes("pro")).toBe(STORAGE_QUOTA_FREE_BYTES * 2);
 		expect(storageLimitBytes("free")).toBe(STORAGE_QUOTA_FREE_BYTES);
 		expect(storageLimitBytes(undefined)).toBe(STORAGE_QUOTA_FREE_BYTES);

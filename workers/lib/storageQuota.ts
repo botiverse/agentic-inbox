@@ -1,12 +1,11 @@
-/** Account storage quota. Every caller-supplied string we persist is billed.
- * Fields this process generates (ids, dates, short sender addresses) are billed
- * once they exceed the fixed size of that generator. */
+/** Account storage quota. Caller-supplied strings are billed at any length.
+ * A thread id that only repeats the row id is not a second copy of caller data.
+ * Dates, message ids, and ordinary sender addresses are billed once they exceed
+ * the fixed size of the value this process generates. */
 
 export const STORAGE_QUOTA_FREE_BYTES = 10 * 1024 * 1024 * 1024;
 export const STORAGE_QUOTA_PRO_BYTES = 20 * 1024 * 1024 * 1024;
 
-/** UUID thread ids are this long. Anything longer was supplied by the caller. */
-export const UNBILLED_THREAD_ID_BYTES = 36;
 /** `uuid@domain` message ids fit under this. Longer ones are caller content. */
 export const UNBILLED_MESSAGE_ID_BYTES = 64;
 /** Normal mailbox addresses fit under this. A longer sender is stored in full. */
@@ -46,7 +45,9 @@ export const EMAIL_ROW_BYTES_SQL = [
 	excessSql("in_reply_to", 0),
 	excessSql("email_references", 0),
 	excessSql("raw_headers", 0),
-	excessSql("thread_id", UNBILLED_THREAD_ID_BYTES),
+	// A thread id equal to the row id only repeats the primary key. Any other
+	// value, including a caller-supplied UUID, is stored caller data and is billed in full.
+	"CASE WHEN thread_id IS NULL OR thread_id = id THEN 0 ELSE COALESCE(LENGTH(CAST(thread_id AS BLOB)), 0) END",
 	excessSql("message_id", UNBILLED_MESSAGE_ID_BYTES),
 	excessSql("sender", UNBILLED_SENDER_BYTES),
 	excessSql("date", UNBILLED_DATE_BYTES),
@@ -91,7 +92,7 @@ export function storedMailBytes(
 		meteredBytes(fields.date, UNBILLED_DATE_BYTES) +
 		meteredBytes(fields.inReplyTo) +
 		meteredBytes(fields.references) +
-		meteredBytes(fields.threadId, UNBILLED_THREAD_ID_BYTES) +
+		meteredBytes(fields.threadId) +
 		meteredBytes(fields.messageId, UNBILLED_MESSAGE_ID_BYTES) +
 		meteredBytes(fields.rawHeaders) +
 		Math.max(0, attachmentBytes)
@@ -119,6 +120,7 @@ export function attachmentRecordBytes(att: {
 /** Bytes of one persisted email row, including every variable-sized column. */
 export function storedRowBytes(
 	row: {
+		id?: string | null;
 		body?: string | null;
 		subject?: string | null;
 		sender?: string | null;
@@ -134,6 +136,7 @@ export function storedRowBytes(
 	},
 	attachmentBytes = 0,
 ): number {
+	const threadId = row.thread_id && row.thread_id !== row.id ? row.thread_id : null;
 	return storedMailBytes(row.body, attachmentBytes, row.subject ?? "", {
 		sender: row.sender,
 		recipient: row.recipient,
@@ -142,7 +145,7 @@ export function storedRowBytes(
 		date: row.date,
 		inReplyTo: row.in_reply_to,
 		references: row.email_references,
-		threadId: row.thread_id,
+		threadId,
 		messageId: row.message_id,
 		rawHeaders: row.raw_headers,
 	});

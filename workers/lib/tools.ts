@@ -643,7 +643,6 @@ export async function toolSendEmail(
 		sender: mailboxId.toLowerCase(),
 		recipient: params.to.toLowerCase(),
 		date: sentAt,
-		threadId: messageId,
 		messageId: outgoingMessageId,
 	});
 	if (!hold.ok) return hold;
