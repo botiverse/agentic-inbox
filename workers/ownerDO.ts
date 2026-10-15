@@ -82,38 +82,17 @@ export class OwnerDO extends DurableObject<Env> {
 	}
 
 	/** Release a slot (e.g. mailbox deleted). Idempotent.
-	 * A seeded account stops paying for this mailbox's current bytes. Adoption
-	 * onto another owner adds them back from the mailbox itself. */
+	 * Mail and attachments stay in the mailbox Durable Object, so the byte
+	 * counter and the per-mailbox baseline stay too. Re-claiming the same
+	 * address does not add those bytes again. A different address still pays
+	 * for whatever is already stored in it. */
 	async release(owner: string, email: string): Promise<{ owned: number }> {
 		await this.ensureSeed(owner);
-		const seeded = Boolean(await this.ctx.storage.get("storage:seeded"));
-		// null: the usage read failed. The slot still goes. Bytes stay charged and
-		// the baseline stays, so a later adoption does not add them a second time.
-		let bytes: number | null = 0;
-		if (seeded) {
-			try {
-				bytes = await this.mailboxUsage(email);
-			} catch {
-				bytes = null;
-			}
-		}
 		return this.ctx.storage.transaction(async (tx) => {
 			const map = (await tx.get<Record<string, string>>("mailboxes")) ?? {};
 			if (!(email in map)) return { owned: Object.keys(map).length };
 			delete map[email];
 			await tx.put("mailboxes", map);
-			if (bytes !== null && (await tx.get("storage:seeded"))) {
-				if (bytes > 0) {
-					const used = Number((await tx.get<number>("storage:used")) ?? 0);
-					const next = Math.max(0, used - bytes);
-					if (next !== used) await tx.put("storage:used", next);
-				}
-				const baseline = (await tx.get<Record<string, number>>("storage:baseline")) ?? {};
-				if (email in baseline) {
-					delete baseline[email];
-					await tx.put("storage:baseline", baseline);
-				}
-			}
 			return { owned: Object.keys(map).length };
 		});
 	}
@@ -149,14 +128,19 @@ export class OwnerDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * Sum body, subject, and attachment bytes already stored for this owner.
-	 * Runs once. A mailbox added while the scan is in flight forces a retry so
-	 * the committed total matches the registry. A later scan must not overwrite
-	 * a counter that reservations have already moved.
+	 * Sum stored bytes for this owner. Runs once. A mailbox added while the
+	 * scan is in flight forces a retry so the committed total matches the
+	 * registry. A later scan must not overwrite a counter that reservations
+	 * have already moved.
+	 *
+	 * "joined" means this call started before the snapshot existed and another
+	 * call committed one while we were scanning. That snapshot already reflects
+	 * the deletes that raced it, so the caller must not subtract again.
 	 */
-	private async ensureUsage(owner: string): Promise<"seeded" | "already"> {
+	private async ensureUsage(owner: string): Promise<"seeded" | "already" | "joined"> {
+		if (await this.ctx.storage.get("storage:seeded")) return "already";
 		for (let attempt = 0; attempt < 5; attempt++) {
-			if (await this.ctx.storage.get("storage:seeded")) return "already";
+			if (await this.ctx.storage.get("storage:seeded")) return "joined";
 			const map = await this.ensureSeed(owner);
 			const emails = this.addressesFor(owner, map);
 			let total = 0;
@@ -166,45 +150,82 @@ export class OwnerDO extends DurableObject<Env> {
 				baseline[email] = bytes;
 				total += bytes;
 			}
-			let wrote = false;
-			let stale = false;
+			let outcome: "wrote" | "joined" | "stale" = "stale";
 			await this.ctx.storage.transaction(async (tx) => {
-				if (await tx.get("storage:seeded")) return;
+				// Transactions can retry. Drop a verdict from a rolled-back attempt.
+				outcome = "stale";
+				if (await tx.get("storage:seeded")) {
+					outcome = "joined";
+					return;
+				}
 				const current = (await tx.get<Record<string, string>>("mailboxes")) ?? map;
 				for (const email of this.addressesFor(owner, current)) {
 					if (!(email in baseline)) {
-						stale = true;
+						outcome = "stale";
 						return;
 					}
 				}
 				await tx.put("storage:used", total);
 				await tx.put("storage:baseline", baseline);
 				await tx.put("storage:seeded", true);
-				wrote = true;
+				outcome = "wrote";
 			});
-			if (stale) continue;
-			return wrote ? "seeded" : "already";
+			if (outcome === "stale") continue;
+			return outcome === "wrote" ? "seeded" : "joined";
 		}
 		throw new Error("storage seed did not converge");
 	}
 
 	/** Reserve `bytes` against the account cap. Does not delete existing mail. */
 	async reserveStorage(owner: string, bytes: number, limit: number): Promise<StorageAdmission> {
+		await this.sweepOrphans();
 		await this.ensureUsage(owner);
 		return reserveStoredBytes(this.ctx.storage, bytes, limit);
 	}
 
 	/**
 	 * Return bytes after a user delete. Existing mail is never removed here.
-	 * The first release after rollout scans storage as it is now. That scan
-	 * already excludes the deleted row, so subtracting `bytes` again would
-	 * leave the counter short and let later writes past the cap.
+	 * A snapshot taken by this call, or by another call that raced it before
+	 * the snapshot existed, already excludes rows deleted ahead of the scan.
+	 * Subtracting on top of that snapshot would credit the same bytes twice.
+	 * A release that starts after the snapshot exists subtracts exactly once.
 	 */
 	async releaseStorage(owner: string, bytes: number): Promise<{ used: number }> {
+		await this.sweepOrphans();
 		const boot = await this.ensureUsage(owner);
-		if (boot === "seeded") {
+		if (boot === "seeded" || boot === "joined") {
 			return { used: Number((await this.ctx.storage.get<number>("storage:used")) ?? 0) };
 		}
 		return releaseStoredBytes(this.ctx.storage, bytes);
+	}
+
+	/** Remember object keys whose bytes stayed charged because delete was not confirmed. */
+	async retainOrphans(keys: string[], bytes: number): Promise<void> {
+		if (keys.length === 0 || bytes <= 0) return;
+		const pending = (await this.ctx.storage.get<Array<{ keys: string[]; bytes: number }>>("storage:orphans")) ?? [];
+		pending.push({ keys, bytes });
+		await this.ctx.storage.put("storage:orphans", pending);
+	}
+
+	/** Retry orphan deletes. A confirmed delete refunds those bytes once. */
+	private async sweepOrphans(): Promise<void> {
+		const bucket = this.env.BUCKET;
+		if (!bucket) return;
+		const pending = (await this.ctx.storage.get<Array<{ keys: string[]; bytes: number }>>("storage:orphans")) ?? [];
+		if (pending.length === 0) return;
+		const remain: Array<{ keys: string[]; bytes: number }> = [];
+		let refund = 0;
+		for (const item of pending) {
+			try {
+				await bucket.delete(item.keys);
+				refund += item.bytes;
+			} catch {
+				remain.push(item);
+			}
+		}
+		await this.ctx.storage.put("storage:orphans", remain);
+		if (refund > 0 && (await this.ctx.storage.get("storage:seeded"))) {
+			await releaseStoredBytes(this.ctx.storage, refund);
+		}
 	}
 }

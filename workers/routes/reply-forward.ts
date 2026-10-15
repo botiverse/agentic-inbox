@@ -4,7 +4,7 @@
 
 import type { Context } from "hono";
 import { sendEmail } from "../email-sender";
-import { AttachmentCleanupError, discardAttachmentObjects, storeAttachments, type StoredAttachment } from "../lib/attachments";
+import { AttachmentCleanupError, attachmentObjectKeys, discardAttachmentObjects, storeAttachments, type StoredAttachment } from "../lib/attachments";
 import type { EmailFull } from "../lib/schemas";
 import {
 	validateSender,
@@ -18,7 +18,7 @@ import { SendEmailRequestSchema } from "../lib/schemas";
 import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
 import { flagContext, sendRateLimits } from "../lib/flags";
-import { chargeSessionWrite, storageQuotaResponse, storedMailBytes } from "../lib/accountStorage";
+import { attachmentRecordBytes, chargeSessionWrite, rememberOrphans, storageQuotaResponse, storedMailBytes } from "../lib/accountStorage";
 
 type AppContext = Context<MailboxContext>;
 type RateLimitStub = { checkSendRateLimit: (limits?: { perHour: number; perDay: number }) => Promise<string | null> };
@@ -56,10 +56,30 @@ export async function handleReplyEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
+	const sentAt = new Date().toISOString();
+	const ccStored = cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null;
+	const bccStored = bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null;
+	const replyHeaders = JSON.stringify([
+		{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
+		{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
+		...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
+		...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
+		{ key: "subject", value: subject },
+		{ key: "date", value: sentAt },
+		{ key: "message-id", value: `<${outgoingMessageId}>` },
+		...(originalMsgId ? [{ key: "in-reply-to", value: `<${originalMsgId}>` }] : []),
+		...(references.length > 0 ? [{ key: "references", value: references.map((r: string) => `<${r}>`).join(" ") }] : []),
+	]);
 	const held = await chargeSessionWrite(
 		c,
 		mailboxId,
-		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0), subject),
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + attachmentRecordBytes({
+			size: atob(att.content).length, filename: att.filename, mimetype: att.type, contentId: att.contentId, disposition: att.disposition,
+		}), 0), subject, {
+			sender: fromEmail, recipient: toStr, cc: ccStored, bcc: bccStored, date: sentAt,
+			inReplyTo: originalMsgId, references: JSON.stringify(references), threadId: thread_id,
+			messageId: outgoingMessageId, rawHeaders: replyHeaders,
+		}),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	let stored = false;
@@ -74,25 +94,15 @@ export async function handleReplyEmail(c: AppContext) {
 			subject,
 			sender: fromEmail,
 			recipient: toStr,
-			cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
-			bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
-			date: new Date().toISOString(),
+			cc: ccStored,
+			bcc: bccStored,
+			date: sentAt,
 			body: html || text || "",
 			in_reply_to: originalMsgId,
 			email_references: JSON.stringify(references),
 			thread_id: thread_id,
 			message_id: outgoingMessageId,
-			raw_headers: JSON.stringify([
-				{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
-				{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
-				...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
-				...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
-				{ key: "subject", value: subject },
-				{ key: "date", value: new Date().toISOString() },
-				{ key: "message-id", value: `<${outgoingMessageId}>` },
-				...(originalMsgId ? [{ key: "in-reply-to", value: `<${originalMsgId}>` }] : []),
-				...(references.length > 0 ? [{ key: "references", value: references.map((r: string) => `<${r}>`).join(" ") }] : []),
-			]),
+			raw_headers: replyHeaders,
 		},
 		attachmentData,
 	);
@@ -125,13 +135,20 @@ export async function handleReplyEmail(c: AppContext) {
 	return c.json({ id: messageId, status: "sent" }, 202);
 	} catch (e) {
 		let keepCharge = e instanceof AttachmentCleanupError;
+		const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
 		if (!stored && !keepCharge && attachmentData?.length) {
 			try {
 				await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
 			} catch (cleanupErr) {
 				console.error("attachment cleanup failed:", (cleanupErr as Error).message);
 				keepCharge = true;
+				orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
 			}
+		}
+		if (!stored && keepCharge && orphanKeys.length > 0) {
+			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes).catch((err) => {
+				console.error("orphan record failed:", (err as Error).message);
+			});
 		}
 		if (!stored && !keepCharge) await held.release();
 		throw e;
@@ -170,10 +187,27 @@ export async function handleForwardEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
+	const sentAt = new Date().toISOString();
+	const ccStored = cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null;
+	const bccStored = bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null;
+	const forwardHeaders = JSON.stringify([
+		{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
+		{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
+		...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
+		...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
+		{ key: "subject", value: subject },
+		{ key: "date", value: sentAt },
+		{ key: "message-id", value: `<${outgoingMessageId}>` },
+	]);
 	const held = await chargeSessionWrite(
 		c,
 		mailboxId,
-		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0), subject),
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + attachmentRecordBytes({
+			size: atob(att.content).length, filename: att.filename, mimetype: att.type, contentId: att.contentId, disposition: att.disposition,
+		}), 0), subject, {
+			sender: fromEmail, recipient: toStr, cc: ccStored, bcc: bccStored, date: sentAt,
+			threadId: messageId, messageId: outgoingMessageId, rawHeaders: forwardHeaders,
+		}),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	let stored = false;
@@ -188,23 +222,15 @@ export async function handleForwardEmail(c: AppContext) {
 			subject,
 			sender: fromEmail,
 			recipient: toStr,
-			cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
-			bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
-			date: new Date().toISOString(),
+			cc: ccStored,
+			bcc: bccStored,
+			date: sentAt,
 			body: html || text || "",
 			in_reply_to: null,
 			email_references: null,
 			thread_id: messageId,
 			message_id: outgoingMessageId,
-			raw_headers: JSON.stringify([
-				{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
-				{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
-				...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
-				...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
-				{ key: "subject", value: subject },
-				{ key: "date", value: new Date().toISOString() },
-				{ key: "message-id", value: `<${outgoingMessageId}>` },
-			]),
+			raw_headers: forwardHeaders,
 		},
 		attachmentData,
 	);
@@ -234,13 +260,20 @@ export async function handleForwardEmail(c: AppContext) {
 	return c.json({ id: messageId, status: "sent" }, 202);
 	} catch (e) {
 		let keepCharge = e instanceof AttachmentCleanupError;
+		const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
 		if (!stored && !keepCharge && attachmentData?.length) {
 			try {
 				await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
 			} catch (cleanupErr) {
 				console.error("attachment cleanup failed:", (cleanupErr as Error).message);
 				keepCharge = true;
+				orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
 			}
+		}
+		if (!stored && keepCharge && orphanKeys.length > 0) {
+			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes).catch((err) => {
+				console.error("orphan record failed:", (err as Error).message);
+			});
 		}
 		if (!stored && !keepCharge) await held.release();
 		throw e;

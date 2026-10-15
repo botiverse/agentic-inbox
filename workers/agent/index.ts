@@ -492,7 +492,14 @@ Based on the email content and thread context above, draft a reply using draft_r
 					const reSubject = emailData.subject.startsWith("Re:")
 						? emailData.subject
 						: `Re: ${emailData.subject}`;
-					const draftHold = await holdMailboxBytes(env, emailData.mailboxId, storedMailBytes(draftBody, 0, reSubject));
+					const draftedAt = new Date().toISOString();
+					const draftHold = await holdMailboxBytes(env, emailData.mailboxId, storedMailBytes(draftBody, 0, reSubject, {
+						sender: emailData.mailboxId.toLowerCase(),
+						recipient: emailData.sender.toLowerCase(),
+						date: draftedAt,
+						inReplyTo: emailData.emailId,
+						threadId: emailData.threadId,
+					}));
 					if (!draftHold.ok) {
 						console.error("Auto-draft skipped: storage quota exceeded");
 					} else {
@@ -504,7 +511,7 @@ Based on the email content and thread context above, draft a reply using draft_r
 									subject: reSubject,
 									sender: emailData.mailboxId.toLowerCase(),
 									recipient: emailData.sender.toLowerCase(),
-									date: new Date().toISOString(),
+									date: draftedAt,
 									// verifyDraft may return plain text or HTML depending on its
 									// code path. Only wrap in textToHtml if it's plain text.
 									body: draftBody,

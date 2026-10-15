@@ -26,6 +26,8 @@ describe("stored mail bytes", () => {
 		expect(storedMailBytes("hi", 3)).toBe(5);
 		expect(storedMailBytes("你", 0)).toBe(3);
 		expect(storedMailBytes("", 0, "x".repeat(1000))).toBe(1000);
+		expect(storedMailBytes("", 0, "", { recipient: "x".repeat(1000) })).toBe(1000);
+		expect(storedMailBytes("body", 0, "", { sender: "box@mail.build", threadId: "x".repeat(36) })).toBe(4);
 		expect(storageLimitBytes("pro")).toBe(STORAGE_QUOTA_FREE_BYTES * 2);
 		expect(storageLimitBytes("free")).toBe(STORAGE_QUOTA_FREE_BYTES);
 		expect(storageLimitBytes(undefined)).toBe(STORAGE_QUOTA_FREE_BYTES);

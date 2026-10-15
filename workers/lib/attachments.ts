@@ -20,9 +20,13 @@ export interface StoredAttachment {
 
 /** The reservation must stay if these objects could not be removed. */
 export class AttachmentCleanupError extends Error {
-	constructor(message: string) {
+	readonly keys: string[];
+	readonly bytes: number;
+	constructor(message: string, keys: string[] = [], bytes = 0) {
 		super(message);
 		this.name = "AttachmentCleanupError";
+		this.keys = keys;
+		this.bytes = bytes;
 	}
 }
 
@@ -56,7 +60,7 @@ export async function storeAttachments(
 ): Promise<StoredAttachment[]> {
 	if (!attachments?.length) return [];
 
-	const results: StoredAttachment[] = [];
+	const attempted: StoredAttachment[] = [];
 	try {
 		for (const att of attachments) {
 			const attachmentId = crypto.randomUUID();
@@ -65,8 +69,9 @@ export async function storeAttachments(
 			const key = `attachments/${emailId}/${attachmentId}/${safeFilename}`;
 			const binaryStr = atob(att.content);
 			const bytes = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
-			await bucket.put(key, bytes);
-			results.push({
+			// Record the key before put. A committed object whose response is lost
+			// is still in `attempted`, so cleanup can delete it.
+			const stored: StoredAttachment = {
 				id: attachmentId,
 				email_id: emailId,
 				filename: safeFilename,
@@ -74,14 +79,18 @@ export async function storeAttachments(
 				size: bytes.byteLength,
 				content_id: att.contentId || null,
 				disposition: att.disposition,
-			});
+			};
+			attempted.push(stored);
+			await bucket.put(key, bytes);
 		}
-		return results;
+		return attempted;
 	} catch (e) {
+		const keys = attachmentObjectKeys(emailId, attempted);
+		const charged = attempted.reduce((sum, att) => sum + att.size, 0);
 		try {
-			await discardAttachmentObjects(bucket, emailId, results);
+			await discardAttachmentObjects(bucket, emailId, attempted);
 		} catch (cleanupErr) {
-			throw new AttachmentCleanupError((cleanupErr as Error).message);
+			throw new AttachmentCleanupError((cleanupErr as Error).message, keys, charged);
 		}
 		throw e;
 	}

@@ -30,14 +30,15 @@ import { verifyDraft } from "./ai";
 import { sendEmail } from "../email-sender";
 import { Folders } from "../../shared/folders";
 import { flagContext, sendRateLimits } from "./flags";
-import { AttachmentCleanupError, discardAttachmentObjects } from "./attachments";
-import { accountOwner, holdMailboxBytes, reclaimStorage, storedMailBytes } from "./accountStorage";
+import { AttachmentCleanupError, attachmentObjectKeys, discardAttachmentObjects } from "./attachments";
+import { accountOwner, holdMailboxBytes, reclaimStorage, rememberOrphans, storedMailBytes } from "./accountStorage";
+import type { StoredMailFields } from "./storageQuota";
 import type { Env } from "../types";
 
 const STORAGE_QUOTA_ERROR = "Account storage quota exceeded. Delete mail to free space. Existing mail is kept.";
 
-async function admitBody(env: Env, mailboxId: string, body: string, subject = "") {
-	const hold = await holdMailboxBytes(env, mailboxId, storedMailBytes(body, 0, subject));
+async function admitBody(env: Env, mailboxId: string, body: string, subject = "", fields: StoredMailFields = {}) {
+	const hold = await holdMailboxBytes(env, mailboxId, storedMailBytes(body, 0, subject, fields));
 	if (!hold.ok) return { ok: false as const, error: STORAGE_QUOTA_ERROR };
 	return hold;
 }
@@ -179,7 +180,14 @@ export async function toolDraftReply(
 			})
 		: "";
 	const bodyHtml = processedBody + quotedBlock;
-	const hold = await admitBody(env, mailboxId, bodyHtml, params.subject);
+	const draftedAt = new Date().toISOString();
+	const hold = await admitBody(env, mailboxId, bodyHtml, params.subject, {
+		sender: mailboxId.toLowerCase(),
+		recipient: params.to.toLowerCase(),
+		date: draftedAt,
+		inReplyTo: params.originalEmailId,
+		threadId,
+	});
 	if (!hold.ok) return hold;
 
 	try {
@@ -190,7 +198,7 @@ export async function toolDraftReply(
 			subject: params.subject,
 			sender: mailboxId.toLowerCase(),
 			recipient: params.to.toLowerCase(),
-			date: new Date().toISOString(),
+			date: draftedAt,
 			body: bodyHtml,
 			in_reply_to: params.originalEmailId,
 			email_references: null,
@@ -263,7 +271,14 @@ export async function toolDraftEmail(
 		resolvedThreadId = draftId;
 	}
 
-	const hold = await admitBody(env, mailboxId, processedBody, params.subject);
+	const draftedAt = new Date().toISOString();
+	const hold = await admitBody(env, mailboxId, processedBody, params.subject, {
+		sender: mailboxId.toLowerCase(),
+		recipient: (params.to || "").toLowerCase(),
+		date: draftedAt,
+		inReplyTo: params.in_reply_to,
+		threadId: resolvedThreadId,
+	});
 	if (!hold.ok) return hold;
 	try {
 	await stub.createEmail(
@@ -273,7 +288,7 @@ export async function toolDraftEmail(
 			subject: params.subject,
 			sender: mailboxId.toLowerCase(),
 			recipient: (params.to || "").toLowerCase(),
-			date: new Date().toISOString(),
+			date: draftedAt,
 			body: processedBody,
 			in_reply_to: params.in_reply_to || null,
 			email_references: null,
@@ -331,8 +346,30 @@ export async function toolUpdateDraft(
 	}
 
 	const nextSubject = params.subject ?? oldDraft.subject ?? "";
-	const oldBytes = (await stub.measureEmailBytes(params.draftId)) ?? storedMailBytes(oldDraft.body, 0, oldDraft.subject ?? "");
-	const delta = storedMailBytes(verifiedBody, 0, nextSubject) - oldBytes;
+	const draftedAt = new Date().toISOString();
+	const recipient = (params.to ?? oldDraft.recipient).toLowerCase();
+	const threadId = oldDraft.thread_id || newDraftId;
+	const nextBytes = storedMailBytes(verifiedBody, 0, nextSubject, {
+		sender: mailboxId.toLowerCase(),
+		recipient,
+		date: draftedAt,
+		inReplyTo: oldDraft.in_reply_to,
+		references: oldDraft.email_references,
+		threadId,
+	});
+	const oldBytes = (await stub.measureEmailBytes(params.draftId)) ?? storedMailBytes(oldDraft.body, 0, oldDraft.subject ?? "", {
+		sender: oldDraft.sender,
+		recipient: oldDraft.recipient,
+		cc: oldDraft.cc,
+		bcc: oldDraft.bcc,
+		date: oldDraft.date,
+		inReplyTo: oldDraft.in_reply_to,
+		references: oldDraft.email_references,
+		threadId: oldDraft.thread_id,
+		messageId: oldDraft.message_id,
+		rawHeaders: oldDraft.raw_headers,
+	});
+	const delta = nextBytes - oldBytes;
 	const hold = delta > 0 ? await holdMailboxBytes(env, mailboxId, delta) : null;
 	if (hold && !hold.ok) return { error: STORAGE_QUOTA_ERROR };
 	let deleted = false;
@@ -348,7 +385,11 @@ export async function toolUpdateDraft(
 				await discardAttachmentObjects(env.BUCKET, params.draftId, removed);
 			} catch (cleanupErr) {
 				console.error("draft attachment cleanup failed:", (cleanupErr as Error).message);
-				throw new AttachmentCleanupError((cleanupErr as Error).message);
+				const keys = attachmentObjectKeys(params.draftId, removed);
+				await rememberOrphans(env, await accountOwner(env, mailboxId), keys, oldBytes).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
+				throw new AttachmentCleanupError((cleanupErr as Error).message, keys, oldBytes);
 			}
 		}
 		deleted = true;
@@ -358,12 +399,12 @@ export async function toolUpdateDraft(
 				id: newDraftId,
 				subject: nextSubject,
 				sender: mailboxId.toLowerCase(),
-				recipient: (params.to ?? oldDraft.recipient).toLowerCase(),
-				date: new Date().toISOString(),
+				recipient,
+				date: draftedAt,
 				body: verifiedBody,
 				in_reply_to: oldDraft.in_reply_to || null,
 				email_references: oldDraft.email_references || null,
-				thread_id: oldDraft.thread_id || newDraftId,
+				thread_id: threadId,
 			},
 			[],
 		);
@@ -514,7 +555,17 @@ export async function toolSendReply(
 		body: originalEmail.body ?? undefined,
 	});
 	const fullBodyHtml = sanitizedBody + quotedBlock;
-	const hold = await admitBody(env, mailboxId, fullBodyHtml, params.subject);
+	const sentAt = new Date().toISOString();
+	const referencesJson = references.length > 0 ? JSON.stringify(references) : null;
+	const hold = await admitBody(env, mailboxId, fullBodyHtml, params.subject, {
+		sender: mailboxId.toLowerCase(),
+		recipient: params.to.toLowerCase(),
+		date: sentAt,
+		inReplyTo: originalMsgId,
+		references: referencesJson,
+		threadId,
+		messageId: outgoingMessageId,
+	});
 	if (!hold.ok) return hold;
 
 	try {
@@ -539,11 +590,10 @@ export async function toolSendReply(
 			subject: params.subject,
 			sender: mailboxId.toLowerCase(),
 			recipient: params.to.toLowerCase(),
-			date: new Date().toISOString(),
+			date: sentAt,
 			body: fullBodyHtml,
 			in_reply_to: originalMsgId,
-			email_references:
-				references.length > 0 ? JSON.stringify(references) : null,
+			email_references: referencesJson,
 			thread_id: threadId,
 			message_id: outgoingMessageId,
 		},
@@ -588,7 +638,14 @@ export async function toolSendEmail(
 		return { error: "Draft verification failed — refusing to send unverified content. Please try again." };
 	}
 
-	const hold = await admitBody(env, mailboxId, sanitizedBody, params.subject);
+	const sentAt = new Date().toISOString();
+	const hold = await admitBody(env, mailboxId, sanitizedBody, params.subject, {
+		sender: mailboxId.toLowerCase(),
+		recipient: params.to.toLowerCase(),
+		date: sentAt,
+		threadId: messageId,
+		messageId: outgoingMessageId,
+	});
 	if (!hold.ok) return hold;
 
 	try {
@@ -612,7 +669,7 @@ export async function toolSendEmail(
 			subject: params.subject,
 			sender: mailboxId.toLowerCase(),
 			recipient: params.to.toLowerCase(),
-			date: new Date().toISOString(),
+			date: sentAt,
 			body: sanitizedBody,
 			in_reply_to: null,
 			email_references: null,

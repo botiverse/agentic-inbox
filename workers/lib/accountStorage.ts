@@ -2,9 +2,9 @@ import type { Context } from "hono";
 import type { Env } from "../types";
 import type { MailboxContext } from "./mailbox";
 import { readMailboxSettings } from "./mailboxRef";
-import { storageLimitBytes, storedMailBytes, type StorageAdmission } from "./storageQuota";
+import { attachmentRecordBytes, storageLimitBytes, storedMailBytes, storedRowBytes, type StorageAdmission } from "./storageQuota";
 
-export { storedMailBytes, storageLimitBytes };
+export { attachmentRecordBytes, storedMailBytes, storedRowBytes, storageLimitBytes };
 
 type SessionPlan = "free" | "pro";
 
@@ -60,6 +60,12 @@ export async function holdMailboxBytes(
 export async function reclaimStorage(env: Env, owner: string, bytes: number): Promise<void> {
 	if (bytes <= 0) return;
 	await ownerStub(env, owner).releaseStorage(owner, bytes);
+}
+
+/** Keep the charge and the object keys when R2 cleanup cannot be confirmed. */
+export async function rememberOrphans(env: Env, owner: string, keys: string[], bytes: number): Promise<void> {
+	if (keys.length === 0 || bytes <= 0) return;
+	await ownerStub(env, owner).retainOrphans(keys, bytes);
 }
 
 export function storageQuotaResponse(decision: Extract<StorageHold, { ok: false }> | StorageAdmission): Response {

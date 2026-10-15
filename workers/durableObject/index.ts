@@ -10,6 +10,7 @@ import * as schema from "../db/schema";
 import { Folders } from "../../shared/folders";
 import type { Env } from "../types";
 import { applyMigrations, mailboxMigrations } from "./migrations";
+import { ATTACHMENT_ROW_BYTES_SQL, EMAIL_ROW_BYTES_SQL } from "../lib/storageQuota";
 
 /**
  * SQL expression to normalize email subjects by stripping common
@@ -537,26 +538,26 @@ export class MailboxDO extends DurableObject<Env> {
 		return { threadId, markedRead: true };
 	}
 
-	/** UTF-8 body and subject bytes plus attachment sizes stored for this mailbox. */
+	/** Billed bytes stored for this mailbox. Matches `storedMailBytes`. */
 	async usageBytes(): Promise<number> {
 		const bodies = [...this.ctx.storage.sql.exec(
-			`SELECT COALESCE(SUM(COALESCE(LENGTH(CAST(body AS BLOB)), 0) + COALESCE(LENGTH(CAST(subject AS BLOB)), 0)), 0) AS bytes FROM emails`,
+			`SELECT COALESCE(SUM(${EMAIL_ROW_BYTES_SQL}), 0) AS bytes FROM emails`,
 		)][0] as { bytes: number } | undefined;
 		const attachments = [...this.ctx.storage.sql.exec(
-			`SELECT COALESCE(SUM(size), 0) AS bytes FROM attachments`,
+			`SELECT COALESCE(SUM(${ATTACHMENT_ROW_BYTES_SQL}), 0) AS bytes FROM attachments`,
 		)][0] as { bytes: number } | undefined;
 		return Number(bodies?.bytes ?? 0) + Number(attachments?.bytes ?? 0);
 	}
 
-	/** Bytes of one message, or null when it is already gone. */
+	/** Billed bytes of one message, or null when it is already gone. */
 	async measureEmailBytes(id: string): Promise<number | null> {
 		const row = [...this.ctx.storage.sql.exec(
-			`SELECT COALESCE(LENGTH(CAST(body AS BLOB)), 0) + COALESCE(LENGTH(CAST(subject AS BLOB)), 0) AS bytes FROM emails WHERE id = ?1`,
+			`SELECT ${EMAIL_ROW_BYTES_SQL} AS bytes FROM emails WHERE id = ?1`,
 			id,
 		)][0] as { bytes: number | null } | undefined;
 		if (!row) return null;
 		const attachments = [...this.ctx.storage.sql.exec(
-			`SELECT COALESCE(SUM(size), 0) AS bytes FROM attachments WHERE email_id = ?1`,
+			`SELECT COALESCE(SUM(${ATTACHMENT_ROW_BYTES_SQL}), 0) AS bytes FROM attachments WHERE email_id = ?1`,
 			id,
 		)][0] as { bytes: number } | undefined;
 		return Number(row.bytes ?? 0) + Number(attachments?.bytes ?? 0);
