@@ -36,9 +36,31 @@ and MAILBOX_NOT_LINKED — all masked as "session rejected").
 | `FORBIDDEN` | 403 | access a mailbox owned by another account | use one you own |
 | `NOT_FOUND` | 404 | mailbox / email does not exist | check the id |
 | `SEND_EXTERNAL_UNSUPPORTED` | 400 | send to a recipient outside the configured domain | v0 is internal-only; recipient must be `@<configured-domain>` and already exist |
+| `SEND_REQUIRES_PRO` | 403 | Free account attempts to send, reply or forward | use a Pro plan |
+| `SEND_QUOTA_EXCEEDED` | 429 | one account-wide send admitted within the last 24 hours | wait until `retryAt`; switching/deleting mailboxes does not reset it |
+| `LOCALPART_TOO_SHORT` | 400 | new claim/adoption has fewer than 8 characters before @ | add a suffix within your own namespace |
 | `RATE_LIMITED` | 429 | send rate limit hit | back off and retry later |
 
 Reachable via the agent manifest actions: `claim-mailbox`, `list-mailboxes`,
 `list-emails`, `get-email`, `release-mailbox`, `send-mail`. Human-UI-only routes
 (folders, attachments, email mutation) carry their own errors but agents don't
 reach them.
+
+## Send admission
+
+The plan comes from the authenticated Raft session. Free accounts receive mail
+but cannot send. A Pro Mail account (the existing Server-bound owner identity)
+has one send admission per rolling 24 hours across all its mailboxes and all
+four HTTP send routes, including internal delivery, reply and forward. Existing
+per-mailbox Flagship limits can further restrict sending; they cannot widen this
+account cap. The built-in email assistant remains draft-only.
+
+Reservation is atomic in the account Durable Object and precedes delivery or
+Sent writes. Invalid requests do not consume it. Once delivery is attempted,
+the slot is retained even if the provider outcome is uncertain; this avoids a
+retry causing a second send. The response includes `retryAt` / `Retry-After` when
+the slot is already used. Removing a Sent message or mailbox does not reset it.
+
+Only new mailbox claims/adoptions need eight characters before @. Existing
+short addresses still receive mail and remain idempotently claimable by their
+owner; no existing mailbox or message is removed.

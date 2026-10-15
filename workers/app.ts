@@ -212,7 +212,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 			actions: [
 				{
 					name: "claim-mailbox",
-					description: "Claim a mailbox. REQUIRED body: {email, name}. `email` = the full address `<yourhandle>@mail.build` (local-part must be ASCII and under your own handle namespace — `<handle>@` or `<handle>-*@`, e.g. `postel@mail.build` or `postel-ci@mail.build`); `name` = a display name. If your handle is non-ASCII (e.g. CJK), you cannot use it directly in an address — claim under your DERIVED namespace instead; the 400/403 error returns your exact claimable `namespace` (an `a-<hash>@mail.build`). If the address already exists but is ownerless it is adopted (you become the owner). Authentication is the Login-with-Raft session only; this response does not include an API key.",
+					description: "Claim a mailbox with at least 8 ASCII characters before @. Existing owned short addresses can still be re-claimed idempotently. REQUIRED body: {email, name}. `email` = the full address `<yourhandle>@mail.build` (local-part must be ASCII and under your own handle namespace — `<handle>@` or `<handle>-*@`, e.g. `postel-ci@mail.build`); `name` = a display name. If your handle is non-ASCII (e.g. CJK), you cannot use it directly in an address — claim under your DERIVED namespace instead; the 400/403 error returns your exact claimable `namespace` (an `a-<hash>@mail.build`). If the address already exists but is ownerless it is adopted (you become the owner). Authentication is the Login-with-Raft session only; this response does not include an API key.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes" },
 					body: {
 						email: "string (required) — the address to claim, e.g. <handle>@mail.build",
@@ -241,7 +241,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "send-mail",
-					description: "Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service. REQUIRED body: {to, subject, text} (or `html`). `from` may be the mailbox itself OR any `+tag` sub-address of it (e.g. `you+shop@mail.build`), so a reply can go out as the alias the sender wrote to instead of disclosing the base address; any other sender is rejected. Recipients on this service (@mail.build) are delivered internally and the mailbox must already exist (else 404). External recipients are supported ONLY on an allow-listed set of domains while outbound deliverability is being verified — a non-allowed domain returns 400 `SEND_EXTERNAL_UNSUPPORTED` listing what IS allowed. An external send that the provider refuses returns 502 `SEND_FAILED`, never a false 202. ONLY to/subject/text/html are honored — any other field (in_reply_to, attachments, cc, …) is REJECTED with 400 `UNSUPPORTED_FIELD` (no threading/attachments yet), so a 202 always means exactly what you sent was delivered.",
+					description: "Pro only: one send admission per rolling 24 hours across the account, including replies and forwards. Free accounts cannot send. An attempted delivery consumes the slot even if its outcome is uncertain; retry only after retryAt. Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service. REQUIRED body: {to, subject, text} (or `html`). `from` may be the mailbox itself OR any `+tag` sub-address of it (e.g. `you+shop@mail.build`), so a reply can go out as the alias the sender wrote to instead of disclosing the base address; any other sender is rejected. Recipients on this service (@mail.build) are delivered internally and the mailbox must already exist (else 404). External recipients are supported ONLY on an allow-listed set of domains while outbound deliverability is being verified — a non-allowed domain returns 400 `SEND_EXTERNAL_UNSUPPORTED` listing what IS allowed. An external send that the provider refuses returns 502 `SEND_FAILED`, never a false 202. ONLY to/subject/text/html are honored — any other field (in_reply_to, attachments, cc, …) is REJECTED with 400 `UNSUPPORTED_FIELD` (no threading/attachments yet), so a 202 always means exactly what you sent was delivered.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/send" },
 					body: {
 						to: "string (required) — recipient address on a configured domain, e.g. someone@mail.build",
@@ -268,6 +268,9 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				NOT_FOUND: "404 — mailbox/email does not exist",
 				SEND_EXTERNAL_UNSUPPORTED: "400 — v0 send is internal-only (recipient must be @a-configured-domain)",
 				RATE_LIMITED: "429 — send rate limit hit; back off and retry",
+				SEND_REQUIRES_PRO: "403 — Free accounts cannot send; Pro is required",
+				SEND_QUOTA_EXCEEDED: "429 — account has used its send slot; retry at retryAt",
+				LOCALPART_TOO_SHORT: "400 — new mailbox names need at least 8 characters before @",
 			},
 		},
 		200,
