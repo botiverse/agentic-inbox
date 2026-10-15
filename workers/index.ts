@@ -30,7 +30,7 @@ import { claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidA
 import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDomains } from "./lib/flags";
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
-import { abortStorageDelete, accountOwner, attachmentRecordBytes, beginStorageDelete, chargeSessionWrite, finishStorageDelete, holdMailboxBytes, rememberOrphans, storageQuotaResponse, storedMailBytes, storedRowBytes } from "./lib/accountStorage";
+import { abortStorageDelete, accountOwner, attachmentRecordBytes, beginStorageDelete, chargeSessionWrite, finishStorageDelete, holdMailboxBytes, rememberOrphans, settleAttemptedCreate, settleCreateHold, storageQuotaResponse, storedMailBytes, storedRowBytes } from "./lib/accountStorage";
 import { checkSendPlan, reserveAuthenticatedSend } from "./lib/sendPolicy";
 import { MIN_MAILBOX_LOCAL_PART_LENGTH } from "../shared/mailPolicy";
 import { Folders } from "../shared/folders";
@@ -136,7 +136,9 @@ async function deliverToInbox(
 		}
 		return created;
 	} catch (e) {
-		await hold?.release();
+		// The RPC rejection does not say the insert rolled back. Release only
+		// when this id is confirmed absent; a failed lookup keeps the reservation.
+		await settleCreateHold(stub, email.id, hold);
 		throw e;
 	}
 }
@@ -506,8 +508,10 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 		return sendDenied;
 	}
 	let attachmentData: Awaited<ReturnType<typeof storeAttachments>> | undefined;
+	let createAttempted = false;
 	try {
 		attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
+		createAttempted = true;
 		await stub.createEmail(Folders.SENT, {
 		id: messageId, subject, sender: fromEmail, recipient: toStr,
 		cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
@@ -518,24 +522,28 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 		raw_headers: sentHeaders,
 	}, attachmentData);
 	} catch (e) {
-		let keepCharge = e instanceof AttachmentCleanupError;
-		const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
-		if (!keepCharge && attachmentData?.length) {
-			try {
-				await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
-			} catch (cleanupErr) {
-				console.error("attachment cleanup failed:", (cleanupErr as Error).message);
-				keepCharge = true;
-				orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+		// storeAttachments failed before createEmail. That write was not attempted.
+		if (!createAttempted) {
+			let keepCharge = e instanceof AttachmentCleanupError;
+			const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
+			if (!keepCharge && attachmentData?.length) {
+				try {
+					await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+				} catch (cleanupErr) {
+					console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+					keepCharge = true;
+					orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+				}
 			}
+			if (keepCharge && held.ok && orphanKeys.length > 0) {
+				await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
+			}
+			if (!keepCharge) await held.release();
+			throw e;
 		}
-		// The row was not stored. A later confirmed object delete refunds the whole hold.
-		if (keepCharge && held.ok && orphanKeys.length > 0) {
-			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
-				console.error("orphan record failed:", (err as Error).message);
-			});
-		}
-		if (!keepCharge) await held.release();
+		await settleAttemptedCreate(c.env, stub, messageId, held, attachmentData);
 		throw e;
 	}
 	await held.commit();
@@ -657,10 +665,11 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			await senderHold.release();
 			return storageQuotaResponse({ ok: false, used: created.used ?? 0, limit: created.limit ?? 0 });
 		}
+		const sentCopyId = crypto.randomUUID();
 		try {
-			await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
+			await c.var.mailboxStub.createEmail(Folders.SENT, { id: sentCopyId, ...common }, []);
 		} catch (e) {
-			await senderHold.release();
+			await settleCreateHold(c.var.mailboxStub, sentCopyId, senderHold);
 			throw e;
 		}
 		await senderHold.commit();
@@ -694,9 +703,10 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 		return c.json({ error: `External send failed: ${msg}`, code: "SEND_FAILED", to }, 502);
 	}
 	// Only record it as Sent once the provider accepted it.
+	const sentCopyId = crypto.randomUUID();
 	try {
 	await c.var.mailboxStub.createEmail(Folders.SENT, {
-		id: crypto.randomUUID(),
+		id: sentCopyId,
 		...common,
 		raw_headers: JSON.stringify([
 			{ key: "from", value: from }, { key: "to", value: to },
@@ -706,7 +716,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 		]),
 	}, []);
 	} catch (e) {
-		await senderHold.release();
+		await settleCreateHold(c.var.mailboxStub, sentCopyId, senderHold);
 		throw e;
 	}
 	await senderHold.commit();
@@ -737,7 +747,7 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 		return storageQuotaResponse(held);
 	}
 	let deleted = false;
-	let stored = false;
+	let createAttempted = false;
 	try {
 		if (draft_id) {
 			const removed = await stub.deleteEmail(draft_id);
@@ -762,20 +772,28 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 			}
 			deleted = true;
 		}
+		createAttempted = true;
 		await stub.createEmail(Folders.DRAFT, draftRow, []);
-		stored = true;
 		await finishStorageDelete(c.env, owner, removal);
 		if (held?.ok) await held.commit();
 		return c.json({ id: messageId, status: "draft", subject: subject || "", recipient: to || "", date: now }, 201);
 	} catch (e) {
-		// A stored replacement keeps its bytes. Rolling it back here would free
-		// space for a draft that still exists. Only a failed create gives them back.
-		// A failed attachment delete keeps the old charge: the row is gone, but the
-		// objects may still be in R2. The new-draft reservation is still released.
+		// Attachment cleanup fails before createEmail. The new row was not attempted,
+		// so its reservation can be released. The old objects keep their charge.
 		const keepOld = e instanceof AttachmentCleanupError;
-		if (!stored && deleted && !keepOld) await finishStorageDelete(c.env, owner, removal);
-		else if (!stored) await abortStorageDelete(c.env, owner, removal);
-		if (!stored && held?.ok) await held.release();
+		if (!createAttempted || keepOld) {
+			if (deleted && !keepOld) await finishStorageDelete(c.env, owner, removal);
+			else await abortStorageDelete(c.env, owner, removal);
+			if (held?.ok) await held.release();
+			throw e;
+		}
+		// createEmail threw. `stored` is not durability: confirm this id, and refund
+		// only when it is absent. An unknown read keeps the new reservation. The old
+		// delete is not finished unless the new row is present or confirmed absent,
+		// so an ambiguous result cannot lend those bytes out.
+		const outcome = await settleCreateHold(stub, messageId, held?.ok ? held : undefined);
+		if (outcome === "present" || (outcome === "absent" && deleted)) await finishStorageDelete(c.env, owner, removal);
+		else await abortStorageDelete(c.env, owner, removal);
 		throw e;
 	}
 });
@@ -1123,7 +1141,7 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 	try {
 		created = await deliverToInbox(ctx.waitUntil.bind(ctx), env, deliveryAddress, stub, inboundRow, attachmentData, { storageHeld: true });
 	} catch (e) {
-		await releaseInboundAttachments(env, inboundHold, messageId, attachmentData);
+		await settleAttemptedCreate(env, stub, messageId, inboundHold, attachmentData);
 		throw e;
 	}
 	if (!created.created) await releaseInboundAttachments(env, inboundHold, messageId, attachmentData);

@@ -18,7 +18,7 @@ import { SendEmailRequestSchema } from "../lib/schemas";
 import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
 import { flagContext, sendRateLimits } from "../lib/flags";
-import { attachmentRecordBytes, chargeSessionWrite, rememberOrphans, storageQuotaResponse, storedMailBytes } from "../lib/accountStorage";
+import { attachmentRecordBytes, chargeSessionWrite, rememberOrphans, settleAttemptedCreate, storageQuotaResponse, storedMailBytes } from "../lib/accountStorage";
 import { reserveAuthenticatedSend } from "../lib/sendPolicy";
 
 type AppContext = Context<MailboxContext>;
@@ -88,11 +88,12 @@ export async function handleReplyEmail(c: AppContext) {
 		await held.release();
 		return sendDenied;
 	}
-	let stored = false;
 	let attachmentData: StoredAttachment[] | undefined;
+	let createAttempted = false;
 	try {
 	attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
+	createAttempted = true;
 	await stub.createEmail(
 		Folders.SENT,
 		{
@@ -112,7 +113,6 @@ export async function handleReplyEmail(c: AppContext) {
 		},
 		attachmentData,
 	);
-	stored = true;
 
 	await stub.markThreadRead(thread_id);
 
@@ -141,23 +141,27 @@ export async function handleReplyEmail(c: AppContext) {
 	await held.commit();
 	return c.json({ id: messageId, status: "sent" }, 202);
 	} catch (e) {
-		let keepCharge = e instanceof AttachmentCleanupError;
-		const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
-		if (!stored && !keepCharge && attachmentData?.length) {
-			try {
-				await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
-			} catch (cleanupErr) {
-				console.error("attachment cleanup failed:", (cleanupErr as Error).message);
-				keepCharge = true;
-				orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+		if (!createAttempted) {
+			let keepCharge = e instanceof AttachmentCleanupError;
+			const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
+			if (!keepCharge && attachmentData?.length) {
+				try {
+					await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+				} catch (cleanupErr) {
+					console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+					keepCharge = true;
+					orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+				}
 			}
+			if (keepCharge && orphanKeys.length > 0) {
+				await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
+			}
+			if (!keepCharge) await held.release();
+			throw e;
 		}
-		if (!stored && keepCharge && orphanKeys.length > 0) {
-			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
-				console.error("orphan record failed:", (err as Error).message);
-			});
-		}
-		if (!stored && !keepCharge) await held.release();
+		await settleAttemptedCreate(c.env, stub, messageId, held, attachmentData);
 		throw e;
 	}
 }
@@ -222,11 +226,12 @@ export async function handleForwardEmail(c: AppContext) {
 		await held.release();
 		return sendDenied;
 	}
-	let stored = false;
 	let attachmentData: StoredAttachment[] | undefined;
+	let createAttempted = false;
 	try {
 	attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
+	createAttempted = true;
 	await stub.createEmail(
 		Folders.SENT,
 		{
@@ -246,7 +251,6 @@ export async function handleForwardEmail(c: AppContext) {
 		},
 		attachmentData,
 	);
-	stored = true;
 
 	c.executionCtx.waitUntil(
 		sendEmail(c.env.EMAIL, {
@@ -272,23 +276,27 @@ export async function handleForwardEmail(c: AppContext) {
 	await held.commit();
 	return c.json({ id: messageId, status: "sent" }, 202);
 	} catch (e) {
-		let keepCharge = e instanceof AttachmentCleanupError;
-		const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
-		if (!stored && !keepCharge && attachmentData?.length) {
-			try {
-				await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
-			} catch (cleanupErr) {
-				console.error("attachment cleanup failed:", (cleanupErr as Error).message);
-				keepCharge = true;
-				orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+		if (!createAttempted) {
+			let keepCharge = e instanceof AttachmentCleanupError;
+			const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
+			if (!keepCharge && attachmentData?.length) {
+				try {
+					await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+				} catch (cleanupErr) {
+					console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+					keepCharge = true;
+					orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+				}
 			}
+			if (keepCharge && orphanKeys.length > 0) {
+				await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
+			}
+			if (!keepCharge) await held.release();
+			throw e;
 		}
-		if (!stored && keepCharge && orphanKeys.length > 0) {
-			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
-				console.error("orphan record failed:", (err as Error).message);
-			});
-		}
-		if (!stored && !keepCharge) await held.release();
+		await settleAttemptedCreate(c.env, stub, messageId, held, attachmentData);
 		throw e;
 	}
 }

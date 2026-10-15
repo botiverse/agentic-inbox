@@ -30,7 +30,7 @@ import {
 	toolMoveEmail,
 	toolDiscardDraft,
 } from "../lib/tools";
-import { holdMailboxBytes, storedMailBytes } from "../lib/accountStorage";
+import { holdMailboxBytes, settleCreateHold, storedMailBytes } from "../lib/accountStorage";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
 import type { Env } from "../types";
 
@@ -523,7 +523,7 @@ Based on the email content and thread context above, draft a reply using draft_r
 							);
 							await draftHold.commit();
 						} catch (e) {
-							await draftHold.release();
+							await settleCreateHold(draftStub, draftId, draftHold);
 							throw e;
 						}
 					}

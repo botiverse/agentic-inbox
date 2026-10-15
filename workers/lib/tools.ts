@@ -31,7 +31,7 @@ import { sendEmail } from "../email-sender";
 import { Folders } from "../../shared/folders";
 import { flagContext, sendRateLimits } from "./flags";
 import { AttachmentCleanupError, attachmentObjectKeys, discardAttachmentObjects } from "./attachments";
-import { abortStorageDelete, accountOwner, beginStorageDelete, finishStorageDelete, holdMailboxBytes, rememberOrphans, storedMailBytes } from "./accountStorage";
+import { abortStorageDelete, accountOwner, beginStorageDelete, finishStorageDelete, holdMailboxBytes, rememberOrphans, settleCreateHold, storedMailBytes } from "./accountStorage";
 import type { StoredMailFields } from "./storageQuota";
 import type { Env } from "../types";
 
@@ -217,7 +217,7 @@ export async function toolDraftReply(
 		},
 	};
 	} catch (e) {
-		await hold.release();
+		await settleCreateHold(stub, draftId, hold);
 		throw e;
 	}
 }
@@ -308,7 +308,7 @@ export async function toolDraftEmail(
 		},
 	};
 	} catch (e) {
-		await hold.release();
+		await settleCreateHold(stub, draftId, hold);
 		throw e;
 	}
 }
@@ -376,7 +376,7 @@ export async function toolUpdateDraft(
 		return { error: STORAGE_QUOTA_ERROR };
 	}
 	let deleted = false;
-	let stored = false;
+	let createAttempted = false;
 	try {
 		const removed = await stub.deleteEmail(params.draftId);
 		if (removed === null) {
@@ -398,6 +398,7 @@ export async function toolUpdateDraft(
 			}
 		}
 		deleted = true;
+		createAttempted = true;
 		await stub.createEmail(
 			Folders.DRAFT,
 			{
@@ -413,15 +414,20 @@ export async function toolUpdateDraft(
 			},
 			[],
 		);
-		stored = true;
 		await finishStorageDelete(env, owner, removal);
 		if (hold?.ok) await hold.commit();
 	} catch (e) {
 		const keepOld = e instanceof AttachmentCleanupError;
-		if (!stored && deleted && !keepOld) await finishStorageDelete(env, owner, removal);
-		else if (!stored) await abortStorageDelete(env, owner, removal);
-		if (!stored && hold?.ok) await hold.release();
-		if (keepOld) return { error: "Attachment cleanup failed. Storage quota was kept." };
+		if (!createAttempted || keepOld) {
+			if (deleted && !keepOld) await finishStorageDelete(env, owner, removal);
+			else await abortStorageDelete(env, owner, removal);
+			if (hold?.ok) await hold.release();
+			if (keepOld) return { error: "Attachment cleanup failed. Storage quota was kept." };
+			throw e;
+		}
+		const outcome = await settleCreateHold(stub, newDraftId, hold?.ok ? hold : undefined);
+		if (outcome === "present" || (outcome === "absent" && deleted)) await finishStorageDelete(env, owner, removal);
+		else await abortStorageDelete(env, owner, removal);
 		throw e;
 	}
 
@@ -637,7 +643,7 @@ export async function toolSendReply(
 		[],
 	);
 	} catch (e) {
-		await hold.release();
+		await settleCreateHold(stub, messageId, hold);
 		throw e;
 	}
 
@@ -719,7 +725,7 @@ export async function toolSendEmail(
 	await hold.commit();
 	return { status: "sent", messageId, message: `Email sent to ${params.to}` };
 	} catch (e) {
-		await hold.release();
+		await settleCreateHold(stub, messageId, hold);
 		throw e;
 	}
 }
