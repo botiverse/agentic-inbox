@@ -7,7 +7,7 @@ import { cors } from "hono/cors";
 import PostalMime from "postal-mime";
 import { z } from "zod";
 import { sendEmail } from "./email-sender";
-import { storeAttachments, type StoredAttachment } from "./lib/attachments";
+import { AttachmentCleanupError, discardAttachmentObjects, storeAttachments, type StoredAttachment } from "./lib/attachments";
 import {
 	validateSender,
 	SenderValidationError,
@@ -114,7 +114,7 @@ async function deliverToInbox(
 ): Promise<{ created: boolean; id: string; quotaExceeded?: boolean; used?: number; limit?: number }> {
 	let release: (() => Promise<void>) | undefined;
 	if (!opts?.storageHeld) {
-		const bytes = storedMailBytes(email.body, attachments.reduce((sum, att) => sum + (att.size || 0), 0));
+		const bytes = storedMailBytes(email.body, attachments.reduce((sum, att) => sum + (att.size || 0), 0), email.subject);
 		const hold = await holdMailboxBytes(env, mailbox, bytes);
 		if (!hold.ok) return { created: false, id: email.id, quotaExceeded: true, used: hold.used, limit: hold.limit };
 		release = hold.release;
@@ -385,8 +385,9 @@ app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
 	const owner = c.get("authOwner");
 	if (owner) {
 		const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
-		// Mail stays in the mailbox Durable Object, so the byte counter is not
-		// reduced here. It drops when those messages are deleted.
+		// Mail stays in the mailbox Durable Object. Once storage is seeded, release
+		// moves this mailbox's current bytes off the counter. Adopting the address
+		// later adds them back from the mailbox itself.
 		await ownerStub.release(owner, mailboxId);
 		await removeOwnedMailbox(c.env, owner, mailboxId);
 	}
@@ -452,10 +453,10 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const held = await chargeSessionWrite(
 		c,
 		mailboxId,
-		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0)),
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0), subject),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
-	let attachmentData;
+	let attachmentData: Awaited<ReturnType<typeof storeAttachments>> | undefined;
 	try {
 		attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 		await stub.createEmail(Folders.SENT, {
@@ -475,7 +476,16 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 		]),
 	}, attachmentData);
 	} catch (e) {
-		await held.release();
+		let keepCharge = e instanceof AttachmentCleanupError;
+		if (!keepCharge && attachmentData?.length) {
+			try {
+				await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+			} catch (cleanupErr) {
+				console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+				keepCharge = true;
+			}
+		}
+		if (!keepCharge) await held.release();
 		throw e;
 	}
 
@@ -574,7 +584,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			{ key: "x-agentic-inbox-delivery", value: "internal" },
 		]),
 	};
-	const senderHold = await chargeSessionWrite(c, from, storedMailBytes(content, 0));
+	const senderHold = await chargeSessionWrite(c, from, storedMailBytes(content, 0, subject));
 	if (!senderHold.ok) return storageQuotaResponse(senderHold);
 	if (isInternal) {
 		// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
@@ -650,7 +660,7 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	const { to, cc, bcc, subject, body, in_reply_to, thread_id, draft_id } = DraftBody.parse(await c.req.json());
 	const stub = c.var.mailboxStub;
 	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
-	const nextBytes = storedMailBytes(body, 0);
+	const nextBytes = storedMailBytes(body, 0, subject || "");
 	const oldBytes = draft_id ? (await stub.measureEmailBytes(draft_id) ?? 0) : 0;
 	const delta = nextBytes - oldBytes;
 	const held = delta > 0 ? await chargeSessionWrite(c, mailboxId, delta) : null;
@@ -659,7 +669,20 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	let stored = false;
 	try {
 		if (draft_id) {
-			await stub.deleteEmail(draft_id);
+			const removed = await stub.deleteEmail(draft_id);
+			if (removed === null) {
+				// The other replacement already took this draft and its old-byte credit.
+				if (held?.ok) await held.release();
+				return c.json({ error: "Draft was replaced concurrently", code: "CONFLICT" }, 409);
+			}
+			if (removed.length > 0) {
+				try {
+					await discardAttachmentObjects(c.env.BUCKET, draft_id, removed);
+				} catch (cleanupErr) {
+					console.error("draft attachment cleanup failed:", (cleanupErr as Error).message);
+					throw new AttachmentCleanupError((cleanupErr as Error).message);
+				}
+			}
 			deleted = true;
 		}
 		const messageId = crypto.randomUUID();
@@ -676,8 +699,11 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	} catch (e) {
 		// A stored replacement keeps its bytes. Rolling it back here would free
 		// space for a draft that still exists. Only a failed create gives them back.
-		if (!stored && deleted && oldBytes > 0) await reclaimStorage(c.env, owner, oldBytes);
-		if (!stored && held && held.ok) await held.release();
+		// A failed attachment delete keeps the old charge: the row is gone, but the
+		// objects may still be in R2. The new-draft delta is still released.
+		const keepOld = e instanceof AttachmentCleanupError;
+		if (!stored && deleted && !keepOld && oldBytes > 0) await reclaimStorage(c.env, owner, oldBytes);
+		if (!stored && held?.ok) await held.release();
 		throw e;
 	}
 });
@@ -723,9 +749,16 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 		// Lost a race with another delete. That request returns the bytes.
 		return c.body(null, 204);
 	}
+	if (attachments.length > 0) {
+		try {
+			await discardAttachmentObjects(c.env.BUCKET, id, attachments);
+		} catch (e) {
+			console.error("attachment cleanup failed:", (e as Error).message);
+			return c.json({ error: "Attachment cleanup failed. Storage quota was kept.", code: "ATTACHMENT_CLEANUP_FAILED" }, 500);
+		}
+	}
 	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
 	await reclaimStorage(c.env, owner, bytes);
-	if (attachments.length > 0) await c.env.BUCKET.delete(attachments.map((att: any) => `attachments/${id}/${att.id}/${att.filename}`));
 	return c.body(null, 204);
 });
 
@@ -919,7 +952,7 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 	const inboundHold = await holdMailboxBytes(
 		env,
 		deliveryAddress,
-		storedMailBytes(inboundBody, pendingAttachments.reduce((sum, att) => sum + att.size, 0)),
+		storedMailBytes(inboundBody, pendingAttachments.reduce((sum, att) => sum + att.size, 0), parsedEmail.subject || ""),
 	);
 	if (!inboundHold.ok) {
 		// Cloudflare's setReject only takes a reason string. The text carries 552,
@@ -938,7 +971,12 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 			});
 		}
 	} catch (e) {
-		await inboundHold.release();
+		try {
+			await discardAttachmentObjects(env.BUCKET, messageId, attachmentData);
+			await inboundHold.release();
+		} catch (cleanupErr) {
+			console.error("inbound attachment cleanup failed:", (cleanupErr as Error).message);
+		}
 		throw e;
 	}
 
@@ -966,17 +1004,19 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 			thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
 		}, attachmentData, { storageHeld: true });
 		if (!created.created) {
-			await inboundHold.release();
-			if (attachmentData.length > 0) {
-				await env.BUCKET.delete(attachmentData.map((att) => `attachments/${messageId}/${att.id}/${att.filename}`));
+			try {
+				await discardAttachmentObjects(env.BUCKET, messageId, attachmentData);
+				await inboundHold.release();
+			} catch (cleanupErr) {
+				console.error("inbound attachment cleanup failed:", (cleanupErr as Error).message);
 			}
 		}
 	} catch (e) {
-		await inboundHold.release();
-		if (attachmentData.length > 0) {
-			await env.BUCKET.delete(attachmentData.map((att) => `attachments/${messageId}/${att.id}/${att.filename}`)).catch((err) => {
-				console.error("inbound quota cleanup failed:", (err as Error).message);
-			});
+		try {
+			await discardAttachmentObjects(env.BUCKET, messageId, attachmentData);
+			await inboundHold.release();
+		} catch (cleanupErr) {
+			console.error("inbound attachment cleanup failed:", (cleanupErr as Error).message);
 		}
 		throw e;
 	}

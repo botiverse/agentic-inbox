@@ -50,29 +50,85 @@ export class OwnerDO extends DurableObject<Env> {
 	}
 
 	/** Atomically reserve a slot for `email`. Idempotent if already owned.
-	 * Returns `{ ok:false }` (without adding) when the plan limit is reached. */
+	 * Returns `{ ok:false }` (without adding) when the plan limit is reached.
+	 * Once storage is seeded, a mailbox adopted with mail already in it adds
+	 * those bytes. Before the seed, the scan picks the mailbox up from the map. */
 	async reserve(
 		owner: string,
 		email: string,
 		name: string,
 		limit: number,
 	): Promise<{ ok: boolean; owned: number }> {
-		const map = await this.ensureSeed(owner);
-		if (email in map) return { ok: true, owned: Object.keys(map).length };
-		if (Object.keys(map).length >= limit) return { ok: false, owned: Object.keys(map).length };
-		map[email] = name || email;
-		await this.ctx.storage.put("mailboxes", map);
-		return { ok: true, owned: Object.keys(map).length };
+		await this.ensureSeed(owner);
+		const seeded = Boolean(await this.ctx.storage.get("storage:seeded"));
+		const incoming = seeded ? await this.mailboxUsage(email) : 0;
+		return this.ctx.storage.transaction(async (tx) => {
+			const map = (await tx.get<Record<string, string>>("mailboxes")) ?? {};
+			if (email in map) return { ok: true, owned: Object.keys(map).length };
+			if (Object.keys(map).length >= limit) return { ok: false, owned: Object.keys(map).length };
+			map[email] = name || email;
+			await tx.put("mailboxes", map);
+			if (await tx.get("storage:seeded")) {
+				const baseline = (await tx.get<Record<string, number>>("storage:baseline")) ?? {};
+				if (!(email in baseline)) {
+					const used = Number((await tx.get<number>("storage:used")) ?? 0);
+					await tx.put("storage:used", used + incoming);
+					baseline[email] = incoming;
+					await tx.put("storage:baseline", baseline);
+				}
+			}
+			return { ok: true, owned: Object.keys(map).length };
+		});
 	}
 
-	/** Release a slot (e.g. mailbox deleted). Idempotent. */
+	/** Release a slot (e.g. mailbox deleted). Idempotent.
+	 * A seeded account stops paying for this mailbox's current bytes. Adoption
+	 * onto another owner adds them back from the mailbox itself. */
 	async release(owner: string, email: string): Promise<{ owned: number }> {
-		const map = await this.ensureSeed(owner);
-		if (email in map) {
-			delete map[email];
-			await this.ctx.storage.put("mailboxes", map);
+		await this.ensureSeed(owner);
+		const seeded = Boolean(await this.ctx.storage.get("storage:seeded"));
+		// null: the usage read failed. The slot still goes. Bytes stay charged and
+		// the baseline stays, so a later adoption does not add them a second time.
+		let bytes: number | null = 0;
+		if (seeded) {
+			try {
+				bytes = await this.mailboxUsage(email);
+			} catch {
+				bytes = null;
+			}
 		}
-		return { owned: Object.keys(map).length };
+		return this.ctx.storage.transaction(async (tx) => {
+			const map = (await tx.get<Record<string, string>>("mailboxes")) ?? {};
+			if (!(email in map)) return { owned: Object.keys(map).length };
+			delete map[email];
+			await tx.put("mailboxes", map);
+			if (bytes !== null && (await tx.get("storage:seeded"))) {
+				if (bytes > 0) {
+					const used = Number((await tx.get<number>("storage:used")) ?? 0);
+					const next = Math.max(0, used - bytes);
+					if (next !== used) await tx.put("storage:used", next);
+				}
+				const baseline = (await tx.get<Record<string, number>>("storage:baseline")) ?? {};
+				if (email in baseline) {
+					delete baseline[email];
+					await tx.put("storage:baseline", baseline);
+				}
+			}
+			return { owned: Object.keys(map).length };
+		});
+	}
+
+	private addressesFor(owner: string, map: Record<string, string>): string[] {
+		const emails = Object.keys(map);
+		if (owner.startsWith("mailbox:")) {
+			const address = owner.slice("mailbox:".length);
+			if (address && !emails.includes(address)) emails.push(address);
+		}
+		return emails;
+	}
+
+	private async mailboxUsage(email: string): Promise<number> {
+		return Number(await mailboxStub(this.env, email).usageBytes()) || 0;
 	}
 
 	/** List owned mailboxes with display names (strongly consistent). */
@@ -93,22 +149,43 @@ export class OwnerDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * Sum body and attachment bytes already stored across this owner's mailboxes.
-	 * Runs once. A later scan must not overwrite a counter that reservations have
-	 * already moved, so the write is skipped once `storage:seeded` is set.
+	 * Sum body, subject, and attachment bytes already stored for this owner.
+	 * Runs once. A mailbox added while the scan is in flight forces a retry so
+	 * the committed total matches the registry. A later scan must not overwrite
+	 * a counter that reservations have already moved.
 	 */
-	private async ensureUsage(owner: string): Promise<void> {
-		if (await this.ctx.storage.get("storage:seeded")) return;
-		const map = await this.ensureSeed(owner);
-		let total = 0;
-		for (const email of Object.keys(map)) {
-			total += await mailboxStub(this.env, email).usageBytes();
+	private async ensureUsage(owner: string): Promise<"seeded" | "already"> {
+		for (let attempt = 0; attempt < 5; attempt++) {
+			if (await this.ctx.storage.get("storage:seeded")) return "already";
+			const map = await this.ensureSeed(owner);
+			const emails = this.addressesFor(owner, map);
+			let total = 0;
+			const baseline: Record<string, number> = {};
+			for (const email of emails) {
+				const bytes = await this.mailboxUsage(email);
+				baseline[email] = bytes;
+				total += bytes;
+			}
+			let wrote = false;
+			let stale = false;
+			await this.ctx.storage.transaction(async (tx) => {
+				if (await tx.get("storage:seeded")) return;
+				const current = (await tx.get<Record<string, string>>("mailboxes")) ?? map;
+				for (const email of this.addressesFor(owner, current)) {
+					if (!(email in baseline)) {
+						stale = true;
+						return;
+					}
+				}
+				await tx.put("storage:used", total);
+				await tx.put("storage:baseline", baseline);
+				await tx.put("storage:seeded", true);
+				wrote = true;
+			});
+			if (stale) continue;
+			return wrote ? "seeded" : "already";
 		}
-		await this.ctx.storage.transaction(async (tx) => {
-			if (await tx.get("storage:seeded")) return;
-			await tx.put("storage:used", total);
-			await tx.put("storage:seeded", true);
-		});
+		throw new Error("storage seed did not converge");
 	}
 
 	/** Reserve `bytes` against the account cap. Does not delete existing mail. */
@@ -117,9 +194,17 @@ export class OwnerDO extends DurableObject<Env> {
 		return reserveStoredBytes(this.ctx.storage, bytes, limit);
 	}
 
-	/** Return bytes after a user delete. Existing mail is never removed here. */
+	/**
+	 * Return bytes after a user delete. Existing mail is never removed here.
+	 * The first release after rollout scans storage as it is now. That scan
+	 * already excludes the deleted row, so subtracting `bytes` again would
+	 * leave the counter short and let later writes past the cap.
+	 */
 	async releaseStorage(owner: string, bytes: number): Promise<{ used: number }> {
-		await this.ensureUsage(owner);
+		const boot = await this.ensureUsage(owner);
+		if (boot === "seeded") {
+			return { used: Number((await this.ctx.storage.get<number>("storage:used")) ?? 0) };
+		}
 		return releaseStoredBytes(this.ctx.storage, bytes);
 	}
 }

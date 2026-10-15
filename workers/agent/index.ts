@@ -489,14 +489,14 @@ Based on the email content and thread context above, draft a reply using draft_r
 					const draftBody = /<[a-z][\s\S]*>/i.test(sanitizedText)
 						? sanitizedText
 						: textToHtml(sanitizedText);
-					const draftHold = await holdMailboxBytes(env, emailData.mailboxId, storedMailBytes(draftBody, 0));
+					const reSubject = emailData.subject.startsWith("Re:")
+						? emailData.subject
+						: `Re: ${emailData.subject}`;
+					const draftHold = await holdMailboxBytes(env, emailData.mailboxId, storedMailBytes(draftBody, 0, reSubject));
 					if (!draftHold.ok) {
 						console.error("Auto-draft skipped: storage quota exceeded");
 					} else {
 						try {
-							const reSubject = emailData.subject.startsWith("Re:")
-								? emailData.subject
-								: `Re: ${emailData.subject}`;
 							await draftStub.createEmail(
 								Folders.DRAFT,
 								{

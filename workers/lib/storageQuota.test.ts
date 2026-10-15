@@ -25,6 +25,7 @@ describe("stored mail bytes", () => {
 	it("counts UTF-8 body bytes and attachment sizes", () => {
 		expect(storedMailBytes("hi", 3)).toBe(5);
 		expect(storedMailBytes("你", 0)).toBe(3);
+		expect(storedMailBytes("", 0, "x".repeat(1000))).toBe(1000);
 		expect(storageLimitBytes("pro")).toBe(STORAGE_QUOTA_FREE_BYTES * 2);
 		expect(storageLimitBytes("free")).toBe(STORAGE_QUOTA_FREE_BYTES);
 		expect(storageLimitBytes(undefined)).toBe(STORAGE_QUOTA_FREE_BYTES);

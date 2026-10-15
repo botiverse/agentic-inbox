@@ -30,13 +30,14 @@ import { verifyDraft } from "./ai";
 import { sendEmail } from "../email-sender";
 import { Folders } from "../../shared/folders";
 import { flagContext, sendRateLimits } from "./flags";
+import { AttachmentCleanupError, discardAttachmentObjects } from "./attachments";
 import { accountOwner, holdMailboxBytes, reclaimStorage, storedMailBytes } from "./accountStorage";
 import type { Env } from "../types";
 
 const STORAGE_QUOTA_ERROR = "Account storage quota exceeded. Delete mail to free space. Existing mail is kept.";
 
-async function admitBody(env: Env, mailboxId: string, body: string) {
-	const hold = await holdMailboxBytes(env, mailboxId, storedMailBytes(body, 0));
+async function admitBody(env: Env, mailboxId: string, body: string, subject = "") {
+	const hold = await holdMailboxBytes(env, mailboxId, storedMailBytes(body, 0, subject));
 	if (!hold.ok) return { ok: false as const, error: STORAGE_QUOTA_ERROR };
 	return hold;
 }
@@ -178,7 +179,7 @@ export async function toolDraftReply(
 			})
 		: "";
 	const bodyHtml = processedBody + quotedBlock;
-	const hold = await admitBody(env, mailboxId, bodyHtml);
+	const hold = await admitBody(env, mailboxId, bodyHtml, params.subject);
 	if (!hold.ok) return hold;
 
 	try {
@@ -262,7 +263,7 @@ export async function toolDraftEmail(
 		resolvedThreadId = draftId;
 	}
 
-	const hold = await admitBody(env, mailboxId, processedBody);
+	const hold = await admitBody(env, mailboxId, processedBody, params.subject);
 	if (!hold.ok) return hold;
 	try {
 	await stub.createEmail(
@@ -329,20 +330,33 @@ export async function toolUpdateDraft(
 		return { error: "Draft verification failed — keeping existing draft unchanged. Please try again." };
 	}
 
-	const oldBytes = (await stub.measureEmailBytes(params.draftId)) ?? storedMailBytes(oldDraft.body, 0);
-	const delta = storedMailBytes(verifiedBody, 0) - oldBytes;
+	const nextSubject = params.subject ?? oldDraft.subject ?? "";
+	const oldBytes = (await stub.measureEmailBytes(params.draftId)) ?? storedMailBytes(oldDraft.body, 0, oldDraft.subject ?? "");
+	const delta = storedMailBytes(verifiedBody, 0, nextSubject) - oldBytes;
 	const hold = delta > 0 ? await holdMailboxBytes(env, mailboxId, delta) : null;
 	if (hold && !hold.ok) return { error: STORAGE_QUOTA_ERROR };
 	let deleted = false;
 	let stored = false;
 	try {
-		await stub.deleteEmail(params.draftId);
+		const removed = await stub.deleteEmail(params.draftId);
+		if (removed === null) {
+			if (hold?.ok) await hold.release();
+			return { error: "Draft was replaced concurrently" };
+		}
+		if (removed.length > 0) {
+			try {
+				await discardAttachmentObjects(env.BUCKET, params.draftId, removed);
+			} catch (cleanupErr) {
+				console.error("draft attachment cleanup failed:", (cleanupErr as Error).message);
+				throw new AttachmentCleanupError((cleanupErr as Error).message);
+			}
+		}
 		deleted = true;
 		await stub.createEmail(
 			Folders.DRAFT,
 			{
 				id: newDraftId,
-				subject: params.subject ?? oldDraft.subject,
+				subject: nextSubject,
 				sender: mailboxId.toLowerCase(),
 				recipient: (params.to ?? oldDraft.recipient).toLowerCase(),
 				date: new Date().toISOString(),
@@ -356,8 +370,10 @@ export async function toolUpdateDraft(
 		stored = true;
 		if (delta < 0) await reclaimMeasured(env, mailboxId, -delta);
 	} catch (e) {
-		if (!stored && deleted) await reclaimMeasured(env, mailboxId, oldBytes);
-		if (!stored && hold && hold.ok) await hold.release();
+		const keepOld = e instanceof AttachmentCleanupError;
+		if (!stored && deleted && !keepOld) await reclaimMeasured(env, mailboxId, oldBytes);
+		if (!stored && hold?.ok) await hold.release();
+		if (keepOld) return { error: "Attachment cleanup failed. Storage quota was kept." };
 		throw e;
 	}
 
@@ -415,7 +431,16 @@ export async function toolDiscardDraft(
 	}
 	const bytes = (await stub.measureEmailBytes(draftId)) ?? 0;
 	const removed = await stub.deleteEmail(draftId);
-	if (removed !== null) await reclaimMeasured(env, mailboxId, bytes);
+	if (removed === null) return { status: "discarded", draftId };
+	if (removed.length > 0) {
+		try {
+			await discardAttachmentObjects(env.BUCKET, draftId, removed);
+		} catch (e) {
+			console.error("draft attachment cleanup failed:", (e as Error).message);
+			return { error: "Attachment cleanup failed. Storage quota was kept.", draftId };
+		}
+	}
+	await reclaimMeasured(env, mailboxId, bytes);
 	return { status: "discarded", draftId };
 }
 
@@ -433,6 +458,14 @@ export async function toolDeleteEmail(
 	}
 	const result = await stub.deleteEmail(emailId);
 	if (result === null) return { status: "deleted", emailId };
+	if (result.length > 0) {
+		try {
+			await discardAttachmentObjects(env.BUCKET, emailId, result);
+		} catch (e) {
+			console.error("attachment cleanup failed:", (e as Error).message);
+			return { error: "Attachment cleanup failed. Storage quota was kept.", emailId };
+		}
+	}
 	await reclaimMeasured(env, mailboxId, bytes);
 	return { status: "deleted", emailId };
 }
@@ -481,7 +514,7 @@ export async function toolSendReply(
 		body: originalEmail.body ?? undefined,
 	});
 	const fullBodyHtml = sanitizedBody + quotedBlock;
-	const hold = await admitBody(env, mailboxId, fullBodyHtml);
+	const hold = await admitBody(env, mailboxId, fullBodyHtml, params.subject);
 	if (!hold.ok) return hold;
 
 	try {
@@ -555,7 +588,7 @@ export async function toolSendEmail(
 		return { error: "Draft verification failed — refusing to send unverified content. Please try again." };
 	}
 
-	const hold = await admitBody(env, mailboxId, sanitizedBody);
+	const hold = await admitBody(env, mailboxId, sanitizedBody, params.subject);
 	if (!hold.ok) return hold;
 
 	try {

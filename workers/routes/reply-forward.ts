@@ -4,7 +4,7 @@
 
 import type { Context } from "hono";
 import { sendEmail } from "../email-sender";
-import { storeAttachments } from "../lib/attachments";
+import { AttachmentCleanupError, discardAttachmentObjects, storeAttachments, type StoredAttachment } from "../lib/attachments";
 import type { EmailFull } from "../lib/schemas";
 import {
 	validateSender,
@@ -59,12 +59,13 @@ export async function handleReplyEmail(c: AppContext) {
 	const held = await chargeSessionWrite(
 		c,
 		mailboxId,
-		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0)),
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0), subject),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	let stored = false;
+	let attachmentData: StoredAttachment[] | undefined;
 	try {
-	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
+	attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
 	await stub.createEmail(
 		Folders.SENT,
@@ -123,7 +124,16 @@ export async function handleReplyEmail(c: AppContext) {
 
 	return c.json({ id: messageId, status: "sent" }, 202);
 	} catch (e) {
-		if (!stored) await held.release();
+		let keepCharge = e instanceof AttachmentCleanupError;
+		if (!stored && !keepCharge && attachmentData?.length) {
+			try {
+				await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+			} catch (cleanupErr) {
+				console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+				keepCharge = true;
+			}
+		}
+		if (!stored && !keepCharge) await held.release();
 		throw e;
 	}
 }
@@ -163,12 +173,13 @@ export async function handleForwardEmail(c: AppContext) {
 	const held = await chargeSessionWrite(
 		c,
 		mailboxId,
-		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0)),
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0), subject),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	let stored = false;
+	let attachmentData: StoredAttachment[] | undefined;
 	try {
-	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
+	attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
 	await stub.createEmail(
 		Folders.SENT,
@@ -222,7 +233,16 @@ export async function handleForwardEmail(c: AppContext) {
 
 	return c.json({ id: messageId, status: "sent" }, 202);
 	} catch (e) {
-		if (!stored) await held.release();
+		let keepCharge = e instanceof AttachmentCleanupError;
+		if (!stored && !keepCharge && attachmentData?.length) {
+			try {
+				await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+			} catch (cleanupErr) {
+				console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+				keepCharge = true;
+			}
+		}
+		if (!stored && !keepCharge) await held.release();
 		throw e;
 	}
 }

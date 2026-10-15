@@ -1,4 +1,4 @@
-/** Account storage quota. Bytes are what we persist: UTF-8 body plus attachment sizes. */
+/** Account storage quota. Bytes are what we persist: UTF-8 body, subject, and attachment sizes. */
 
 export const STORAGE_QUOTA_FREE_BYTES = 10 * 1024 * 1024 * 1024;
 export const STORAGE_QUOTA_PRO_BYTES = 20 * 1024 * 1024 * 1024;
@@ -13,9 +13,13 @@ export function bodyBytes(body: string | null | undefined): number {
 	return new TextEncoder().encode(body ?? "").byteLength;
 }
 
-/** Bytes a message will add. `attachmentBytes` is the sum of stored attachment sizes. */
-export function storedMailBytes(body: string | null | undefined, attachmentBytes = 0): number {
-	return bodyBytes(body) + Math.max(0, attachmentBytes);
+/** Bytes a message will add. Subject is stored beside the body and is not free. */
+export function storedMailBytes(
+	body: string | null | undefined,
+	attachmentBytes = 0,
+	subject = "",
+): number {
+	return bodyBytes(body) + bodyBytes(subject) + Math.max(0, attachmentBytes);
 }
 
 type StorageTx = {
