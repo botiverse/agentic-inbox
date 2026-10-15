@@ -72,9 +72,9 @@ export class OwnerDO extends DurableObject<Env> {
 			await tx.put("mailboxes", map);
 			if (await tx.get("storage:seeded")) {
 				const baseline = (await tx.get<Record<string, number>>("storage:baseline")) ?? {};
-				const retained = (await tx.get<Record<string, number>>(RETAINED_KEY)) ?? {};
+				const retained = (await tx.get<Record<string, RetainedRec | number>>(RETAINED_KEY)) ?? {};
 				if (email in baseline || email in retained) {
-					if (!(email in baseline)) baseline[email] = retained[email] ?? incoming;
+					if (!(email in baseline)) baseline[email] = retainedTotal(asRetained(retained[email]));
 					if (email in retained) {
 						delete retained[email];
 						await tx.put(RETAINED_KEY, retained);
@@ -104,9 +104,12 @@ export class OwnerDO extends DurableObject<Env> {
 			const map = (await tx.get<Record<string, string>>("mailboxes")) ?? {};
 			if (!(email in map)) return { owned: Object.keys(map).length };
 			const baseline = (await tx.get<Record<string, number>>("storage:baseline")) ?? {};
-			const retained = (await tx.get<Record<string, number>>(RETAINED_KEY)) ?? {};
-			retained[email] = live;
-			if (!(email in baseline)) baseline[email] = live;
+			const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
+			const retained = (await tx.get<Record<string, RetainedRec | number>>(RETAINED_KEY)) ?? {};
+			// The snapshot is the bytes visible now, plus writes already reserved.
+			// Commit folds those writes into the snapshot; cancel drops them.
+			retained[email] = { bytes: live, pending: { ...holds } };
+			if (!(email in baseline)) baseline[email] = live + sumValues(holds);
 			delete map[email];
 			await tx.put("mailboxes", map);
 			await tx.put("storage:baseline", baseline);
@@ -168,9 +171,10 @@ export class OwnerDO extends DurableObject<Env> {
 				baseline[email] = bytes;
 				total += bytes;
 			}
-			const retained = (await this.ctx.storage.get<Record<string, number>>(RETAINED_KEY)) ?? {};
-			for (const [email, bytes] of Object.entries(retained)) {
+			const retained = (await this.ctx.storage.get<Record<string, RetainedRec | number>>(RETAINED_KEY)) ?? {};
+			for (const [email, value] of Object.entries(retained)) {
 				if (!(email in baseline)) {
+					const bytes = retainedTotal(asRetained(value));
 					baseline[email] = bytes;
 					total += bytes;
 				}
@@ -214,14 +218,14 @@ export class OwnerDO extends DurableObject<Env> {
 	}
 
 	/**
-	 * Bytes still stored, plus retained mailboxes no longer in the registry.
-	 * Read inside the admission transaction so the decision matches the counter
-	 * update. An open delete record is not subtracted here.
+	 * Bytes still stored: registered mailboxes, plus retained snapshots.
+	 * A retained snapshot includes writes that were reserved when the slot was
+	 * released and have not been cancelled. Orphan objects are not in here.
 	 */
 	private async accountedLive(
 		owner: string,
 		map: Record<string, string>,
-		retained: Record<string, number>,
+		retained: Record<string, RetainedRec | number>,
 	): Promise<number> {
 		let total = 0;
 		const seen = new Set<string>();
@@ -229,10 +233,25 @@ export class OwnerDO extends DurableObject<Env> {
 			seen.add(email);
 			total += await this.mailboxUsage(email);
 		}
-		for (const [email, bytes] of Object.entries(retained)) {
-			if (!seen.has(email)) total += Number(bytes) || 0;
+		for (const [email, value] of Object.entries(retained)) {
+			if (!seen.has(email)) total += retainedTotal(asRetained(value));
 		}
 		return total;
+	}
+
+	/** Move a reserved write into a retained snapshot, or drop it if the reserve was cancelled. */
+	private async settleRetainedHold(tx: StorageTx, id: string, commit: boolean): Promise<void> {
+		const retained = (await tx.get<Record<string, RetainedRec | number>>(RETAINED_KEY)) ?? {};
+		let changed = false;
+		for (const [email, value] of Object.entries(retained)) {
+			const rec = asRetained(value);
+			if (!(id in rec.pending)) continue;
+			if (commit) rec.bytes += Math.max(0, Math.floor(rec.pending[id] ?? 0));
+			delete rec.pending[id];
+			retained[email] = rec;
+			changed = true;
+		}
+		if (changed) await tx.put(RETAINED_KEY, retained);
 	}
 
 	/**
@@ -252,10 +271,14 @@ export class OwnerDO extends DurableObject<Env> {
 			const map = (await tx.get<Record<string, string>>("mailboxes")) ?? {};
 			const retained = (await tx.get<Record<string, number>>(RETAINED_KEY)) ?? {};
 			const live = await this.accountedLive(owner, map, retained);
-			// Bytes already gone can be reused. Bytes only named by an open delete cannot,
-			// unless this call holds that delete's exclusive allowance.
-			const visible = Math.min(used, live + sumValues(holds));
 			const deletes = (await tx.get<Record<string, DeleteRec>>(DELETES_KEY)) ?? {};
+			const orphans = (await tx.get<OrphanRecord[]>("storage:orphans")) ?? [];
+			// A low scan releases quota only for bytes an open delete still names,
+			// and only after orphans and outstanding holds are still counted.
+			// An orphan or a write that landed after release is not that evidence.
+			const gap = Math.max(0, used - sumValues(holds) - live - orphanBytes(orphans));
+			const reclaimed = Math.min(openDeleteBytes(deletes), gap);
+			const visible = Math.max(0, used - reclaimed);
 			const prepared = deleteId ? asDelete(deletes[deleteId]) : null;
 			const exclusive = prepared && !prepared.claimed && prepared.credit > 0 ? prepared.credit : 0;
 			if (visible - exclusive + add > limit) return { ok: false, used, limit };
@@ -281,6 +304,7 @@ export class OwnerDO extends DurableObject<Env> {
 				const credit = Math.max(0, Math.floor(holds[id] ?? 0));
 				delete holds[id];
 				await tx.put(HOLDS_KEY, holds);
+				await this.settleRetainedHold(tx, id, false);
 				const used = Number((await tx.get<number>("storage:used")) ?? 0);
 				const next = Math.max(0, used - credit);
 				if (next !== used) await tx.put("storage:used", next);
@@ -299,6 +323,7 @@ export class OwnerDO extends DurableObject<Env> {
 			if (id in holds) {
 				delete holds[id];
 				await tx.put(HOLDS_KEY, holds);
+				await this.settleRetainedHold(tx, id, true);
 			}
 			return { used: await this.reported(tx) };
 		});
@@ -375,6 +400,7 @@ export class OwnerDO extends DurableObject<Env> {
 				if (holdId in holds) {
 					delete holds[holdId];
 					await tx.put(HOLDS_KEY, holds);
+					await this.settleRetainedHold(tx, holdId, false);
 				}
 			}
 			const pending = (await tx.get<OrphanRecord[]>("storage:orphans")) ?? [];
@@ -429,6 +455,33 @@ type StorageTx = {
 type OrphanRecord = { id?: string; keys: string[]; bytes: number };
 
 type DeleteRec = { bytes: number; credit: number; row?: string; claimed?: boolean };
+
+type RetainedRec = { bytes: number; pending: Record<string, number> };
+
+function asRetained(value: RetainedRec | number | undefined): RetainedRec {
+	if (typeof value === "number") return { bytes: value, pending: {} };
+	if (!value || typeof value !== "object") return { bytes: 0, pending: {} };
+	return { bytes: Number(value.bytes) || 0, pending: value.pending ?? {} };
+}
+
+function retainedTotal(rec: RetainedRec): number {
+	return rec.bytes + sumValues(rec.pending);
+}
+
+function openDeleteBytes(deletes: Record<string, DeleteRec | number>): number {
+	let total = 0;
+	for (const value of Object.values(deletes)) {
+		const rec = asDelete(value);
+		if (rec) total += Math.max(0, Math.floor(rec.bytes));
+	}
+	return total;
+}
+
+function orphanBytes(rows: OrphanRecord[]): number {
+	let total = 0;
+	for (const row of rows) total += Math.max(0, Math.floor(row.bytes));
+	return total;
+}
 
 function asDelete(value: DeleteRec | number | undefined): DeleteRec | null {
 	if (typeof value === "number") return { bytes: value, credit: value };
