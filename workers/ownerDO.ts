@@ -208,30 +208,65 @@ export class OwnerDO extends DurableObject<Env> {
 		throw new Error("storage seed did not converge");
 	}
 
-	/** Counter minus open deletion credits. Holds are already inside the counter. */
+	/** Stored counter. Holds are already inside it. An open delete is not. */
 	private async reported(tx: StorageTx): Promise<number> {
-		const used = Number((await tx.get<number>("storage:used")) ?? 0);
-		const deletes = (await tx.get<Record<string, number>>(DELETES_KEY)) ?? {};
-		return Math.max(0, used - sumValues(deletes));
+		return Number((await tx.get<number>("storage:used")) ?? 0);
 	}
 
-	/** Reserve `bytes` for one write. The returned id is the only handle that can cancel it. */
-	async reserveStorage(owner: string, bytes: number, limit: number): Promise<StorageAdmission> {
+	/**
+	 * Bytes still stored, plus retained mailboxes no longer in the registry.
+	 * Read inside the admission transaction so the decision matches the counter
+	 * update. An open delete record is not subtracted here.
+	 */
+	private async accountedLive(
+		owner: string,
+		map: Record<string, string>,
+		retained: Record<string, number>,
+	): Promise<number> {
+		let total = 0;
+		const seen = new Set<string>();
+		for (const email of this.addressesFor(owner, map)) {
+			seen.add(email);
+			total += await this.mailboxUsage(email);
+		}
+		for (const [email, bytes] of Object.entries(retained)) {
+			if (!seen.has(email)) total += Number(bytes) || 0;
+		}
+		return total;
+	}
+
+	/**
+	 * Reserve `bytes` for one write. The returned id is the only handle that can cancel it.
+	 * `deleteId`, when set, may spend that one prepared delete and no other writer can.
+	 * The first open for a row owns the allowance; a second open for the same row does not.
+	 */
+	async reserveStorage(owner: string, bytes: number, limit: number, deleteId?: string): Promise<StorageAdmission> {
 		await this.sweepOrphans();
 		await this.ensureUsage(owner);
 		const add = Math.max(0, Math.floor(bytes));
 		const id = crypto.randomUUID();
 		return this.ctx.storage.transaction(async (tx) => {
-			const visible = await this.reported(tx);
-			if (add > 0 && visible + add > limit) return { ok: false, used: visible, limit };
-			if (add > 0) {
-				const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
-				holds[id] = add;
-				await tx.put(HOLDS_KEY, holds);
-				const used = Number((await tx.get<number>("storage:used")) ?? 0);
-				await tx.put("storage:used", used + add);
+			const used = await this.reported(tx);
+			if (add <= 0) return { ok: true, used, limit };
+			const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
+			const map = (await tx.get<Record<string, string>>("mailboxes")) ?? {};
+			const retained = (await tx.get<Record<string, number>>(RETAINED_KEY)) ?? {};
+			const live = await this.accountedLive(owner, map, retained);
+			// Bytes already gone can be reused. Bytes only named by an open delete cannot,
+			// unless this call holds that delete's exclusive allowance.
+			const visible = Math.min(used, live + sumValues(holds));
+			const deletes = (await tx.get<Record<string, DeleteRec>>(DELETES_KEY)) ?? {};
+			const prepared = deleteId ? asDelete(deletes[deleteId]) : null;
+			const exclusive = prepared && !prepared.claimed && prepared.credit > 0 ? prepared.credit : 0;
+			if (visible - exclusive + add > limit) return { ok: false, used, limit };
+			holds[id] = add;
+			await tx.put(HOLDS_KEY, holds);
+			await tx.put("storage:used", used + add);
+			if (prepared && exclusive > 0 && deleteId) {
+				deletes[deleteId] = { ...prepared, claimed: true };
+				await tx.put(DELETES_KEY, deletes);
 			}
-			return { ok: true, used: await this.reported(tx), limit, id: add > 0 ? id : undefined };
+			return { ok: true, used: used + add, limit, id };
 		});
 	}
 
@@ -269,16 +304,28 @@ export class OwnerDO extends DurableObject<Env> {
 		});
 	}
 
-	/** Name the bytes a delete will return. Call this before the row or objects are removed. */
-	async openStorageDelete(owner: string, bytes: number): Promise<{ id: string; used: number }> {
+	/**
+	 * Name the bytes a delete will return. Call this before the row or objects are removed.
+	 * The record does not change the counter and does not free space for other writes.
+	 * `rowKey` binds the exclusive replacement allowance to one row; a second open for
+	 * that row keeps its own refund amount but cannot spend the allowance again.
+	 * A record left behind by a killed request still does not reduce admission.
+	 */
+	async openStorageDelete(owner: string, bytes: number, rowKey?: string): Promise<{ id: string; used: number }> {
 		await this.sweepOrphans();
 		await this.ensureUsage(owner);
-		const credit = Math.max(0, Math.floor(bytes));
-		if (credit <= 0) return { id: "", used: await this.reported(this.ctx.storage) };
+		const amount = Math.max(0, Math.floor(bytes));
+		if (amount <= 0) return { id: "", used: await this.reported(this.ctx.storage) };
 		const id = crypto.randomUUID();
 		return this.ctx.storage.transaction(async (tx) => {
-			const deletes = (await tx.get<Record<string, number>>(DELETES_KEY)) ?? {};
-			deletes[id] = credit;
+			const deletes = (await tx.get<Record<string, DeleteRec>>(DELETES_KEY)) ?? {};
+			const rowTaken = Boolean(
+				rowKey && Object.values(deletes).some((value) => {
+					const rec = asDelete(value);
+					return rec?.row === rowKey && rec.credit > 0;
+				}),
+			);
+			deletes[id] = { bytes: amount, credit: rowTaken ? 0 : amount, row: rowKey, claimed: false };
 			await tx.put(DELETES_KEY, deletes);
 			return { id, used: await this.reported(tx) };
 		});
@@ -290,11 +337,12 @@ export class OwnerDO extends DurableObject<Env> {
 		await this.sweepOrphans();
 		await this.ensureUsage(owner);
 		return this.ctx.storage.transaction(async (tx) => {
-			const deletes = (await tx.get<Record<string, number>>(DELETES_KEY)) ?? {};
-			if (id in deletes) {
-				const credit = Math.max(0, Math.floor(deletes[id] ?? 0));
+			const deletes = (await tx.get<Record<string, DeleteRec>>(DELETES_KEY)) ?? {};
+			const rec = asDelete(deletes[id]);
+			if (rec) {
 				delete deletes[id];
 				await tx.put(DELETES_KEY, deletes);
+				const credit = Math.max(0, Math.floor(rec.bytes));
 				const used = Number((await tx.get<number>("storage:used")) ?? 0);
 				const next = Math.max(0, used - credit);
 				if (next !== used) await tx.put("storage:used", next);
@@ -303,11 +351,11 @@ export class OwnerDO extends DurableObject<Env> {
 		});
 	}
 
-	/** The delete did not happen. Drop its credit without touching the counter. */
+	/** The delete did not happen. Drop its record without touching the counter. */
 	async abortStorageDelete(owner: string, id: string): Promise<{ used: number }> {
 		if (!id) return { used: await this.reported(this.ctx.storage) };
 		return this.ctx.storage.transaction(async (tx) => {
-			const deletes = (await tx.get<Record<string, number>>(DELETES_KEY)) ?? {};
+			const deletes = (await tx.get<Record<string, DeleteRec>>(DELETES_KEY)) ?? {};
 			if (id in deletes) {
 				delete deletes[id];
 				await tx.put(DELETES_KEY, deletes);
@@ -379,6 +427,14 @@ type StorageTx = {
 };
 
 type OrphanRecord = { id?: string; keys: string[]; bytes: number };
+
+type DeleteRec = { bytes: number; credit: number; row?: string; claimed?: boolean };
+
+function asDelete(value: DeleteRec | number | undefined): DeleteRec | null {
+	if (typeof value === "number") return { bytes: value, credit: value };
+	if (!value || typeof value !== "object") return null;
+	return value;
+}
 
 function sumValues(map: Record<string, number>): number {
 	let total = 0;

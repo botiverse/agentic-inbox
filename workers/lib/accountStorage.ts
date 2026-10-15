@@ -35,11 +35,12 @@ export async function holdStorage(
 	owner: string,
 	bytes: number,
 	plan?: SessionPlan | null,
+	deleteId?: string | null,
 ): Promise<StorageHold> {
 	const stub = ownerStub(env, owner);
 	if (plan) await stub.rememberPlan(plan);
 	const effective = plan ?? (await stub.plan());
-	const decision = await stub.reserveStorage(owner, bytes, storageLimitBytes(effective));
+	const decision = await stub.reserveStorage(owner, bytes, storageLimitBytes(effective), deleteId || undefined);
 	if (!decision.ok) return { ok: false, used: decision.used, limit: decision.limit };
 	const id = decision.id ?? "";
 	let settled = false;
@@ -61,10 +62,16 @@ export async function holdStorage(
 	};
 }
 
-/** Record a delete before the row is removed. Complete or abort that id exactly once. */
-export async function beginStorageDelete(env: Env, owner: string, bytes: number): Promise<string | null> {
+/** Record a delete before the row is removed. Complete or abort that id exactly once.
+ * `rowKey` is the row whose bytes a replacement may spend. Other writes cannot. */
+export async function beginStorageDelete(
+	env: Env,
+	owner: string,
+	bytes: number,
+	rowKey?: string,
+): Promise<string | null> {
 	if (bytes <= 0) return null;
-	const opened = await ownerStub(env, owner).openStorageDelete(owner, bytes);
+	const opened = await ownerStub(env, owner).openStorageDelete(owner, bytes, rowKey);
 	return opened.id || null;
 }
 
@@ -82,10 +89,10 @@ export async function holdMailboxBytes(
 	env: Env,
 	mailbox: string,
 	bytes: number,
-	session?: { owner?: string | null; plan?: SessionPlan | null },
+	session?: { owner?: string | null; plan?: SessionPlan | null; deleteId?: string | null },
 ): Promise<StorageHold> {
 	const owner = await accountOwner(env, mailbox, session?.owner);
-	return holdStorage(env, owner, bytes, session?.plan);
+	return holdStorage(env, owner, bytes, session?.plan, session?.deleteId);
 }
 
 /** Keep the charge and the object keys when R2 cleanup cannot be confirmed.
@@ -117,9 +124,11 @@ export async function chargeSessionWrite(
 	c: Context<MailboxContext>,
 	mailbox: string,
 	bytes: number,
+	deleteId?: string | null,
 ): Promise<StorageHold> {
 	return holdMailboxBytes(c.env, mailbox, bytes, {
 		owner: c.get("authOwner"),
 		plan: c.get("authPlan"),
+		deleteId,
 	});
 }

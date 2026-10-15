@@ -369,8 +369,8 @@ export async function toolUpdateDraft(
 		rawHeaders: oldDraft.raw_headers,
 	});
 	const owner = await accountOwner(env, mailboxId);
-	const removal = oldBytes > 0 ? await beginStorageDelete(env, owner, oldBytes) : null;
-	const hold = nextBytes > 0 ? await holdMailboxBytes(env, mailboxId, nextBytes) : null;
+	const removal = oldBytes > 0 ? await beginStorageDelete(env, owner, oldBytes, `${mailboxId}/${params.draftId}`) : null;
+	const hold = nextBytes > 0 ? await holdMailboxBytes(env, mailboxId, nextBytes, { deleteId: removal }) : null;
 	if (hold && !hold.ok) {
 		await abortStorageDelete(env, owner, removal);
 		return { error: STORAGE_QUOTA_ERROR };
@@ -479,8 +479,14 @@ export async function toolDiscardDraft(
 	}
 	const bytes = (await stub.measureEmailBytes(draftId)) ?? 0;
 	const owner = await accountOwner(env, mailboxId);
-	const deletion = await beginStorageDelete(env, owner, bytes);
-	const removed = await stub.deleteEmail(draftId);
+	const deletion = await beginStorageDelete(env, owner, bytes, `${mailboxId}/${draftId}`);
+	let removed!: Awaited<ReturnType<typeof stub.deleteEmail>>;
+	try {
+		removed = await stub.deleteEmail(draftId);
+	} catch (e) {
+		await abortStorageDelete(env, owner, deletion);
+		throw e;
+	}
 	if (removed === null) {
 		await abortStorageDelete(env, owner, deletion);
 		return { status: "discarded", draftId };
@@ -511,8 +517,14 @@ export async function toolDeleteEmail(
 		return { error: "Email not found", emailId };
 	}
 	const owner = await accountOwner(env, mailboxId);
-	const deletion = await beginStorageDelete(env, owner, bytes);
-	const result = await stub.deleteEmail(emailId);
+	const deletion = await beginStorageDelete(env, owner, bytes, `${mailboxId}/${emailId}`);
+	let result!: Awaited<ReturnType<typeof stub.deleteEmail>>;
+	try {
+		result = await stub.deleteEmail(emailId);
+	} catch (e) {
+		await abortStorageDelete(env, owner, deletion);
+		throw e;
+	}
 	if (result === null) {
 		await abortStorageDelete(env, owner, deletion);
 		return { status: "deleted", emailId };

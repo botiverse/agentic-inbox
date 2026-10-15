@@ -698,8 +698,8 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	const oldBytes = draft_id ? (await stub.measureEmailBytes(draft_id) ?? 0) : 0;
 	// Name the old row's bytes before anyone deletes it. The reserve below is the
 	// next await that loses the draft; do not add another await after it returns.
-	const removal = draft_id && oldBytes > 0 ? await beginStorageDelete(c.env, owner, oldBytes) : null;
-	const held = nextBytes > 0 ? await chargeSessionWrite(c, mailboxId, nextBytes) : null;
+	const removal = draft_id && oldBytes > 0 ? await beginStorageDelete(c.env, owner, oldBytes, `${mailboxId}/${draft_id}`) : null;
+	const held = nextBytes > 0 ? await chargeSessionWrite(c, mailboxId, nextBytes, removal) : null;
 	if (held && !held.ok) {
 		await abortStorageDelete(c.env, owner, removal);
 		return storageQuotaResponse(held);
@@ -785,24 +785,36 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 	const bytes = await c.var.mailboxStub.measureEmailBytes(id);
 	if (bytes === null) return c.json({ error: "Not found" }, 404);
 	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
-	const deletion = await beginStorageDelete(c.env, owner, bytes);
-	const attachments = await c.var.mailboxStub.deleteEmail(id);
-	if (attachments === null) {
-		// Lost a race with another delete. That request returns the bytes.
-		await abortStorageDelete(c.env, owner, deletion);
-		return c.body(null, 204);
-	}
-	if (attachments.length > 0) {
-		try {
-			await discardAttachmentObjects(c.env.BUCKET, id, attachments);
-		} catch (e) {
-			console.error("attachment cleanup failed:", (e as Error).message);
+	const deletion = await beginStorageDelete(c.env, owner, bytes, `${mailboxId}/${id}`);
+	let deleted = false;
+	try {
+		const attachments = await c.var.mailboxStub.deleteEmail(id);
+		if (attachments === null) {
+			// Lost a race with another delete. That request returns the bytes.
 			await abortStorageDelete(c.env, owner, deletion);
-			return c.json({ error: "Attachment cleanup failed. Storage quota was kept.", code: "ATTACHMENT_CLEANUP_FAILED" }, 500);
+			return c.body(null, 204);
 		}
+		deleted = true;
+		if (attachments.length > 0) {
+			try {
+				await discardAttachmentObjects(c.env.BUCKET, id, attachments);
+			} catch (e) {
+				console.error("attachment cleanup failed:", (e as Error).message);
+				await abortStorageDelete(c.env, owner, deletion);
+				return c.json({ error: "Attachment cleanup failed. Storage quota was kept.", code: "ATTACHMENT_CLEANUP_FAILED" }, 500);
+			}
+		}
+		await finishStorageDelete(c.env, owner, deletion);
+		return c.body(null, 204);
+	} catch (e) {
+		// The row is still there. Drop the prepared delete so a later admission
+		// cannot treat it as free space. A delete that already removed the row
+		// settles instead; aborting it would leave the counter high forever.
+		if (deleted) await finishStorageDelete(c.env, owner, deletion);
+		else await abortStorageDelete(c.env, owner, deletion);
+		console.error("delete failed:", (e as Error).message);
+		return c.json({ error: "Delete failed. Storage quota was kept.", code: "DELETE_FAILED" }, 500);
 	}
-	await finishStorageDelete(c.env, owner, deletion);
-	return c.body(null, 204);
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/emails/:id/move", async (c: AppContext) => {
