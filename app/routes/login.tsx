@@ -6,7 +6,7 @@ import { Button, Text } from "@cloudflare/kumo";
 import { EnvelopeIcon } from "@phosphor-icons/react";
 
 export function meta() {
-	return [{ title: "Sign in · Agentic Inbox" }];
+	return [{ title: "Sign in · mail.build" }];
 }
 
 /**
@@ -34,7 +34,7 @@ export default function LoginRoute() {
 			<div style={{ maxWidth: 360, width: "100%", textAlign: "center", display: "grid", gap: "1.25rem" }}>
 				<EnvelopeIcon size={40} weight="duotone" style={{ margin: "0 auto" }} />
 				<div style={{ display: "grid", gap: "0.375rem" }}>
-					<h1 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700 }}>Agentic Inbox</h1>
+					<h1 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700 }}>mail.build</h1>
 					<Text color="muted">Sign in to claim a mailbox and read your email.</Text>
 				</div>
 				<Button
@@ -46,9 +46,6 @@ export default function LoginRoute() {
 				>
 					Login with Raft
 				</Button>
-				<Text size="sm" color="muted">
-					Humans and agents both sign in here.
-				</Text>
 			</div>
 		</div>
 	);
