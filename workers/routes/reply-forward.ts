@@ -18,6 +18,7 @@ import { SendEmailRequestSchema } from "../lib/schemas";
 import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
 import { flagContext, sendRateLimits } from "../lib/flags";
+import { chargeSessionWrite, storageQuotaResponse, storedMailBytes } from "../lib/accountStorage";
 
 type AppContext = Context<MailboxContext>;
 type RateLimitStub = { checkSendRateLimit: (limits?: { perHour: number; perDay: number }) => Promise<string | null> };
@@ -55,6 +56,14 @@ export async function handleReplyEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
+	const held = await chargeSessionWrite(
+		c,
+		mailboxId,
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0)),
+	);
+	if (!held.ok) return storageQuotaResponse(held);
+	let stored = false;
+	try {
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
 	await stub.createEmail(
@@ -86,6 +95,7 @@ export async function handleReplyEmail(c: AppContext) {
 		},
 		attachmentData,
 	);
+	stored = true;
 
 	await stub.markThreadRead(thread_id);
 
@@ -112,6 +122,10 @@ export async function handleReplyEmail(c: AppContext) {
 	);
 
 	return c.json({ id: messageId, status: "sent" }, 202);
+	} catch (e) {
+		if (!stored) await held.release();
+		throw e;
+	}
 }
 
 export async function handleForwardEmail(c: AppContext) {
@@ -146,6 +160,14 @@ export async function handleForwardEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
+	const held = await chargeSessionWrite(
+		c,
+		mailboxId,
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + atob(att.content).length, 0)),
+	);
+	if (!held.ok) return storageQuotaResponse(held);
+	let stored = false;
+	try {
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
 	await stub.createEmail(
@@ -175,6 +197,7 @@ export async function handleForwardEmail(c: AppContext) {
 		},
 		attachmentData,
 	);
+	stored = true;
 
 	c.executionCtx.waitUntil(
 		sendEmail(c.env.EMAIL, {
@@ -198,4 +221,8 @@ export async function handleForwardEmail(c: AppContext) {
 	);
 
 	return c.json({ id: messageId, status: "sent" }, 202);
+	} catch (e) {
+		if (!stored) await held.release();
+		throw e;
+	}
 }

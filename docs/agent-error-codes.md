@@ -37,8 +37,19 @@ and MAILBOX_NOT_LINKED — all masked as "session rejected").
 | `NOT_FOUND` | 404 | mailbox / email does not exist | check the id |
 | `SEND_EXTERNAL_UNSUPPORTED` | 400 | send to a recipient outside the configured domain | v0 is internal-only; recipient must be `@<configured-domain>` and already exist |
 | `RATE_LIMITED` | 429 | send rate limit hit | back off and retry later |
+| `STORAGE_QUOTA_EXCEEDED` | 413 | account storage is at the plan cap (free 10GiB, pro 20GiB, summed across mailboxes) | delete mail to free space; existing mail is kept |
 
 Reachable via the agent manifest actions: `claim-mailbox`, `list-mailboxes`,
 `list-emails`, `get-email`, `release-mailbox`, `send-mail`. Human-UI-only routes
 (folders, attachments, email mutation) carry their own errors but agents don't
 reach them.
+
+## Storage quota
+
+Free accounts can store 10GiB and Pro accounts 20GiB, summed across every mailbox
+on that login owner. The counter includes mail that was already stored. A new
+message, draft, reply, forward, or inbound delivery that would pass the cap is
+refused (`STORAGE_QUOTA_EXCEEDED`, or inbound `552 Quota exceeded`) and the
+existing mail stays. Deleting a message returns its body and attachment bytes.
+Human and agent owners are counted separately. The cap is 10×1024³ and 20×1024³
+bytes.

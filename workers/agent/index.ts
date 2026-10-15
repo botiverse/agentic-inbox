@@ -30,6 +30,7 @@ import {
 	toolMoveEmail,
 	toolDiscardDraft,
 } from "../lib/tools";
+import { holdMailboxBytes, storedMailBytes } from "../lib/accountStorage";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
 import type { Env } from "../types";
 
@@ -485,28 +486,39 @@ Based on the email content and thread context above, draft a reply using draft_r
 				} else {
 					const draftId = crypto.randomUUID();
 					const draftStub = getMailboxStub(env, emailData.mailboxId);
-					const reSubject = emailData.subject.startsWith("Re:")
-						? emailData.subject
-						: `Re: ${emailData.subject}`;
-					await draftStub.createEmail(
-						Folders.DRAFT,
-						{
-							id: draftId,
-							subject: reSubject,
-							sender: emailData.mailboxId.toLowerCase(),
-							recipient: emailData.sender.toLowerCase(),
-							date: new Date().toISOString(),
-						// verifyDraft may return plain text or HTML depending on its
-						// code path. Only wrap in textToHtml if it's plain text.
-						body: /<[a-z][\s\S]*>/i.test(sanitizedText)
-							? sanitizedText
-							: textToHtml(sanitizedText),
-						in_reply_to: emailData.emailId,
-							email_references: null,
-							thread_id: emailData.threadId,
-						},
-						[],
-					);
+					const draftBody = /<[a-z][\s\S]*>/i.test(sanitizedText)
+						? sanitizedText
+						: textToHtml(sanitizedText);
+					const draftHold = await holdMailboxBytes(env, emailData.mailboxId, storedMailBytes(draftBody, 0));
+					if (!draftHold.ok) {
+						console.error("Auto-draft skipped: storage quota exceeded");
+					} else {
+						try {
+							const reSubject = emailData.subject.startsWith("Re:")
+								? emailData.subject
+								: `Re: ${emailData.subject}`;
+							await draftStub.createEmail(
+								Folders.DRAFT,
+								{
+									id: draftId,
+									subject: reSubject,
+									sender: emailData.mailboxId.toLowerCase(),
+									recipient: emailData.sender.toLowerCase(),
+									date: new Date().toISOString(),
+									// verifyDraft may return plain text or HTML depending on its
+									// code path. Only wrap in textToHtml if it's plain text.
+									body: draftBody,
+									in_reply_to: emailData.emailId,
+									email_references: null,
+									thread_id: emailData.threadId,
+								},
+								[],
+							);
+						} catch (e) {
+							await draftHold.release();
+							throw e;
+						}
+					}
 					// Inline text saved as draft
 				}
 			}

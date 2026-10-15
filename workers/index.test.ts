@@ -1,6 +1,18 @@
 import { describe, it, expect } from "vitest";
 import { app, receiveEmail } from "./index";
 
+function admittingOwner() {
+	return {
+		idFromName: (id: string) => id,
+		get: () => ({
+			plan: async () => "free",
+			rememberPlan: async () => {},
+			reserveStorage: async () => ({ ok: true, used: 0, limit: 10 }),
+			releaseStorage: async () => ({ used: 0 }),
+		}),
+	};
+}
+
 // These hit the mailbox-create validation path, which returns before any
 // Cloudflare binding (R2/DO) is touched — so they run in plain Node with an
 // empty env. Regression cover for: invalid input must return a clean 400, not
@@ -109,6 +121,7 @@ function envWithMailboxes(existing: string[]) {
 			}),
 		},
 		EMAIL_AGENT: { idFromName: (n: string) => n, get: () => ({ fetch: async () => new Response("") }) },
+		OWNER: admittingOwner(),
 	} as never;
 	return { heads, doNames, stored, sent, waited, env };
 }
@@ -244,6 +257,7 @@ describe("internal send resolves a +tag recipient to its base mailbox", () => {
 					checkSendRateLimit: async () => null,
 				}),
 			},
+			OWNER: admittingOwner(),
 		} as never;
 		const res = await app.request(
 			`/api/v1/mailboxes/postel@mail.build/send`,
@@ -304,6 +318,7 @@ describe("send routing: internal / allow-listed external / refused", () => {
 					checkSendRateLimit: async () => null,
 				}),
 			},
+			OWNER: admittingOwner(),
 		} as never;
 		return { e, sent, stored };
 	}
@@ -390,7 +405,9 @@ describe("INBOX writes only go through deliverToInbox", () => {
 			let bodyEnd = -1;
 			if (fn >= 0) {
 				// Skip the parameter/return-type braces (`stub: { … }`, `Promise<{ … }>`).
-				const marker = "\n): Promise<{ created: boolean; id: string }> {";
+				// The return type grew when storage admission was added; the marker must
+				// still land on the function body's opening brace.
+				const marker = "\n): Promise<{ created: boolean; id: string; quotaExceeded?: boolean; used?: number; limit?: number }> {";
 				const sigEnd = text.indexOf(marker, fn);
 				bodyStart = sigEnd >= 0 ? sigEnd + marker.length - 1 : -1;
 				let depth = 0;

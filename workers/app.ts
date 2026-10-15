@@ -145,12 +145,21 @@ app.use("*", async (c, next) => {
 	if (c.env.RAFT_SESSION_SECRET) {
 		const session = await openSession(c.req.raw, c.env.RAFT_SESSION_SECRET);
 		if (session) {
-			c.set("authOwner", ownerFromPrincipal(session.principal));
+			const owner = ownerFromPrincipal(session.principal);
+			const plan = session.principal.plan === "pro" ? "pro" : "free";
+			c.set("authOwner", owner);
 			c.set("authScope", "account");
 			c.set("authIsAdmin", false);
 			if (session.principal.preferredUsername) c.set("authHandle", session.principal.preferredUsername);
-			c.set("authPlan", session.principal.plan === "pro" ? "pro" : "free");
+			c.set("authPlan", plan);
 			c.set("authNotifyRouting", routingFromPrincipal(session.principal));
+			// Inbound mail has no session. Remember the plan so a later delivery
+			// uses 20GB for Pro and 10GB otherwise. A stamp failure must not block login.
+			try {
+				await c.env.OWNER.get(c.env.OWNER.idFromName(owner)).rememberPlan(plan);
+			} catch (e) {
+				console.error("storage plan stamp failed:", (e as Error).message);
+			}
 			return next();
 		}
 	}
@@ -268,6 +277,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				NOT_FOUND: "404 — mailbox/email does not exist",
 				SEND_EXTERNAL_UNSUPPORTED: "400 — v0 send is internal-only (recipient must be @a-configured-domain)",
 				RATE_LIMITED: "429 — send rate limit hit; back off and retry",
+				STORAGE_QUOTA_EXCEEDED: "413 — account storage is full (free 10GiB, pro 20GiB, summed across mailboxes). Delete mail to free space. Existing mail is kept.",
 			},
 		},
 		200,

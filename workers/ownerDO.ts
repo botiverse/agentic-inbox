@@ -4,6 +4,8 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./types";
+import { mailboxStub } from "./lib/mailboxRef";
+import { releaseStoredBytes, reserveStoredBytes, type StorageAdmission } from "./lib/storageQuota";
 
 /**
  * Per-owner mailbox registry. Addressed by `idFromName(owner)`, so one instance
@@ -77,5 +79,47 @@ export class OwnerDO extends DurableObject<Env> {
 	async list(owner: string): Promise<Array<{ email: string; name: string }>> {
 		const map = await this.ensureSeed(owner);
 		return Object.entries(map).map(([email, name]) => ({ email, name }));
+	}
+
+	/** Last plan seen on an authenticated request. Missing stays free. */
+	async rememberPlan(plan: "free" | "pro"): Promise<void> {
+		const current = await this.ctx.storage.get<string>("storage:plan");
+		if (current === plan) return;
+		await this.ctx.storage.put("storage:plan", plan);
+	}
+
+	async plan(): Promise<"free" | "pro"> {
+		return (await this.ctx.storage.get<string>("storage:plan")) === "pro" ? "pro" : "free";
+	}
+
+	/**
+	 * Sum body and attachment bytes already stored across this owner's mailboxes.
+	 * Runs once. A later scan must not overwrite a counter that reservations have
+	 * already moved, so the write is skipped once `storage:seeded` is set.
+	 */
+	private async ensureUsage(owner: string): Promise<void> {
+		if (await this.ctx.storage.get("storage:seeded")) return;
+		const map = await this.ensureSeed(owner);
+		let total = 0;
+		for (const email of Object.keys(map)) {
+			total += await mailboxStub(this.env, email).usageBytes();
+		}
+		await this.ctx.storage.transaction(async (tx) => {
+			if (await tx.get("storage:seeded")) return;
+			await tx.put("storage:used", total);
+			await tx.put("storage:seeded", true);
+		});
+	}
+
+	/** Reserve `bytes` against the account cap. Does not delete existing mail. */
+	async reserveStorage(owner: string, bytes: number, limit: number): Promise<StorageAdmission> {
+		await this.ensureUsage(owner);
+		return reserveStoredBytes(this.ctx.storage, bytes, limit);
+	}
+
+	/** Return bytes after a user delete. Existing mail is never removed here. */
+	async releaseStorage(owner: string, bytes: number): Promise<{ used: number }> {
+		await this.ensureUsage(owner);
+		return releaseStoredBytes(this.ctx.storage, bytes);
 	}
 }

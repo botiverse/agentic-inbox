@@ -537,6 +537,31 @@ export class MailboxDO extends DurableObject<Env> {
 		return { threadId, markedRead: true };
 	}
 
+	/** UTF-8 body bytes plus attachment sizes stored for this mailbox. */
+	async usageBytes(): Promise<number> {
+		const bodies = [...this.ctx.storage.sql.exec(
+			`SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) AS bytes FROM emails`,
+		)][0] as { bytes: number } | undefined;
+		const attachments = [...this.ctx.storage.sql.exec(
+			`SELECT COALESCE(SUM(size), 0) AS bytes FROM attachments`,
+		)][0] as { bytes: number } | undefined;
+		return Number(bodies?.bytes ?? 0) + Number(attachments?.bytes ?? 0);
+	}
+
+	/** Bytes of one message, or null when it is already gone. */
+	async measureEmailBytes(id: string): Promise<number | null> {
+		const row = [...this.ctx.storage.sql.exec(
+			`SELECT LENGTH(CAST(body AS BLOB)) AS bytes FROM emails WHERE id = ?1`,
+			id,
+		)][0] as { bytes: number | null } | undefined;
+		if (!row) return null;
+		const attachments = [...this.ctx.storage.sql.exec(
+			`SELECT COALESCE(SUM(size), 0) AS bytes FROM attachments WHERE email_id = ?1`,
+			id,
+		)][0] as { bytes: number } | undefined;
+		return Number(row.bytes ?? 0) + Number(attachments?.bytes ?? 0);
+	}
+
 	async deleteEmail(id: string) {
 		const email = this.db
 			.select({ id: schema.emails.id })
