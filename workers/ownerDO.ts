@@ -243,7 +243,7 @@ export class OwnerDO extends DurableObject<Env> {
 	 * `deleteId`, when set, may spend that one prepared delete and no other writer can.
 	 * The first open for a row owns the allowance; a second open for the same row does not.
 	 */
-	async reserveStorage(owner: string, bytes: number, limit: number, deleteId?: string): Promise<StorageAdmission> {
+	async reserveStorage(owner: string, bytes: number, limit: number, deleteId?: string, rowKey?: string): Promise<StorageAdmission> {
 		await this.sweepOrphans();
 		await this.ensureUsage(owner);
 		const add = Math.max(0, Math.floor(bytes));
@@ -264,6 +264,16 @@ export class OwnerDO extends DurableObject<Env> {
 			holds[id] = add;
 			await tx.put(HOLDS_KEY, holds);
 			await tx.put("storage:used", used + add);
+			if (rowKey) {
+				// This hold and a later delete of the same row share one charge.
+				// A new reserve for the row replaces an older unsettled link.
+				const holdRows = (await tx.get<Record<string, string>>(HOLD_ROWS_KEY)) ?? {};
+				holdRows[id] = rowKey;
+				await tx.put(HOLD_ROWS_KEY, holdRows);
+				const charges = (await tx.get<Record<string, RowCharge>>(ROW_CHARGES_KEY)) ?? {};
+				charges[rowKey] = { holdId: id, refunded: false };
+				await tx.put(ROW_CHARGES_KEY, charges);
+			}
 			if (prepared && exclusive > 0 && deleteId) {
 				deletes[deleteId] = { ...prepared, claimed: true };
 				await tx.put(DELETES_KEY, deletes);
@@ -284,9 +294,14 @@ export class OwnerDO extends DurableObject<Env> {
 				delete holds[id];
 				await tx.put(HOLDS_KEY, holds);
 				await this.settleRetainedHold(tx, id, false);
-				const used = Number((await tx.get<number>("storage:used")) ?? 0);
-				const next = Math.max(0, used - credit);
-				if (next !== used) await tx.put("storage:used", next);
+				// A delete of this row may already have returned the charge. The hold
+				// id is then gone or marked, and cancelling it must not subtract again.
+				const already = await this.markRowCharge(tx, id, true);
+				if (!already) {
+					const used = Number((await tx.get<number>("storage:used")) ?? 0);
+					const next = Math.max(0, used - credit);
+					if (next !== used) await tx.put("storage:used", next);
+				}
 			}
 			return { used: await this.reported(tx) };
 		});
@@ -303,6 +318,9 @@ export class OwnerDO extends DurableObject<Env> {
 				delete holds[id];
 				await tx.put(HOLDS_KEY, holds);
 				await this.settleRetainedHold(tx, id, true);
+				// The row is stored and still charged. Drop the link so a later
+				// user delete of this row can refund exactly once.
+				await this.clearUnrefundedCharge(tx, id);
 			}
 			return { used: await this.reported(tx) };
 		});
@@ -347,8 +365,12 @@ export class OwnerDO extends DurableObject<Env> {
 			if (rec) {
 				delete deletes[id];
 				await tx.put(DELETES_KEY, deletes);
+				// The create hold for this row is the same charge. Retire it here
+				// without a second subtract, and remember that the charge is returned
+				// so a later cancel of that hold cannot subtract either.
+				const already = rec.row ? await this.retireRowHold(tx, rec.row) : false;
 				// orphanId means retainOrphans already owns this refund.
-				const credit = rec.orphanId ? 0 : Math.max(0, Math.floor(rec.bytes));
+				const credit = rec.orphanId || already ? 0 : Math.max(0, Math.floor(rec.bytes));
 				const used = Number((await tx.get<number>("storage:used")) ?? 0);
 				const next = Math.max(0, used - credit);
 				if (next !== used) await tx.put("storage:used", next);
@@ -411,6 +433,60 @@ export class OwnerDO extends DurableObject<Env> {
 	 * The record is removed in the same transaction as its refund, matched by id,
 	 * so a second sweeper cannot refund it and an append during the delete is kept.
 	 */
+	/** Remember that `holdId`'s row charge was refunded. Returns true when a delete already did. */
+	private async markRowCharge(tx: StorageTx, holdId: string, refunded: boolean): Promise<boolean> {
+		const holdRows = (await tx.get<Record<string, string>>(HOLD_ROWS_KEY)) ?? {};
+		const rowKey = holdRows[holdId];
+		if (!rowKey) return false;
+		delete holdRows[holdId];
+		await tx.put(HOLD_ROWS_KEY, holdRows);
+		const charges = (await tx.get<Record<string, RowCharge>>(ROW_CHARGES_KEY)) ?? {};
+		const charge = charges[rowKey];
+		if (!charge || charge.holdId !== holdId) return false;
+		const already = Boolean(charge.refunded);
+		charges[rowKey] = { holdId, refunded };
+		await tx.put(ROW_CHARGES_KEY, charges);
+		return already;
+	}
+
+	/** The write was committed. This hold no longer shares a refund with a future delete. */
+	private async clearUnrefundedCharge(tx: StorageTx, holdId: string): Promise<void> {
+		const holdRows = (await tx.get<Record<string, string>>(HOLD_ROWS_KEY)) ?? {};
+		const rowKey = holdRows[holdId];
+		if (!rowKey) return;
+		delete holdRows[holdId];
+		await tx.put(HOLD_ROWS_KEY, holdRows);
+		const charges = (await tx.get<Record<string, RowCharge>>(ROW_CHARGES_KEY)) ?? {};
+		const charge = charges[rowKey];
+		if (!charge || charge.holdId !== holdId || charge.refunded) return;
+		delete charges[rowKey];
+		await tx.put(ROW_CHARGES_KEY, charges);
+	}
+
+	/** A delete is settling this row. Retire its create hold and report whether the charge was already returned. */
+	private async retireRowHold(tx: StorageTx, rowKey: string): Promise<boolean> {
+		const charges = (await tx.get<Record<string, RowCharge>>(ROW_CHARGES_KEY)) ?? {};
+		const charge = charges[rowKey];
+		if (!charge) return false;
+		const already = Boolean(charge.refunded);
+		if (charge.holdId) {
+			const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
+			if (charge.holdId in holds) {
+				delete holds[charge.holdId];
+				await tx.put(HOLDS_KEY, holds);
+				await this.settleRetainedHold(tx, charge.holdId, false);
+			}
+			const holdRows = (await tx.get<Record<string, string>>(HOLD_ROWS_KEY)) ?? {};
+			if (charge.holdId in holdRows) {
+				delete holdRows[charge.holdId];
+				await tx.put(HOLD_ROWS_KEY, holdRows);
+			}
+		}
+		charges[rowKey] = { holdId: charge.holdId, refunded: true };
+		await tx.put(ROW_CHARGES_KEY, charges);
+		return already;
+	}
+
 	private async sweepOrphans(): Promise<void> {
 		const bucket = this.env.BUCKET;
 		if (!bucket) return;
@@ -441,6 +517,8 @@ export class OwnerDO extends DurableObject<Env> {
 }
 
 const HOLDS_KEY = "storage:holds";
+const HOLD_ROWS_KEY = "storage:holdRows";
+const ROW_CHARGES_KEY = "storage:rowCharges";
 const DELETES_KEY = "storage:deletes";
 const RETAINED_KEY = "storage:retained";
 
@@ -452,6 +530,9 @@ type StorageTx = {
 type OrphanRecord = { id?: string; keys: string[]; bytes: number; deleteId?: string };
 
 type DeleteRec = { bytes: number; credit: number; row?: string; claimed?: boolean; orphanId?: string };
+
+/** One refund for a row, shared by the create hold and a later delete of that row. */
+type RowCharge = { holdId: string; refunded: boolean };
 
 type RetainedRec = { bytes: number; pending: Record<string, number> };
 

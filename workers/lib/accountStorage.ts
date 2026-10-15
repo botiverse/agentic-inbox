@@ -37,11 +37,12 @@ export async function holdStorage(
 	bytes: number,
 	plan?: SessionPlan | null,
 	deleteId?: string | null,
+	rowKey?: string | null,
 ): Promise<StorageHold> {
 	const stub = ownerStub(env, owner);
 	if (plan) await stub.rememberPlan(plan);
 	const effective = plan ?? (await stub.plan());
-	const decision = await stub.reserveStorage(owner, bytes, storageLimitBytes(effective), deleteId || undefined);
+	const decision = await stub.reserveStorage(owner, bytes, storageLimitBytes(effective), deleteId || undefined, rowKey || undefined);
 	if (!decision.ok) return { ok: false, used: decision.used, limit: decision.limit };
 	const id = decision.id ?? "";
 	let settled = false;
@@ -90,10 +91,10 @@ export async function holdMailboxBytes(
 	env: Env,
 	mailbox: string,
 	bytes: number,
-	session?: { owner?: string | null; plan?: SessionPlan | null; deleteId?: string | null },
+	session?: { owner?: string | null; plan?: SessionPlan | null; deleteId?: string | null; rowKey?: string | null },
 ): Promise<StorageHold> {
 	const owner = await accountOwner(env, mailbox, session?.owner);
-	return holdStorage(env, owner, bytes, session?.plan, session?.deleteId);
+	return holdStorage(env, owner, bytes, session?.plan, session?.deleteId, session?.rowKey);
 }
 
 /** Keep the charge and the object keys when R2 cleanup cannot be confirmed.
@@ -119,7 +120,8 @@ type MeasurableMailbox = {
 export type CreateWriteOutcome = "present" | "absent" | "unknown";
 
 /** A thrown createEmail is not proof the row is missing.
- * A number means this id is stored. null means this id is confirmed absent.
+ * A number means this id is stored. null means it is not stored now, which is
+ * also true after another request deleted it and refunded the shared row charge.
  * A missing method or a thrown read is not absence: the reservation stays. */
 export async function createWriteOutcome(
 	stub: MeasurableMailbox | null | undefined,
@@ -136,7 +138,8 @@ export async function createWriteOutcome(
 	}
 }
 
-/** Commit when the row is present, release only when it is confirmed absent, and leave the reservation when the lookup itself fails. */
+/** Commit when the row is present. On null, cancel only if this hold's row charge
+ * was not already returned by its delete. A failed lookup leaves the reservation. */
 export async function settleCreateHold(
 	stub: MeasurableMailbox | null | undefined,
 	id: string,
@@ -198,10 +201,12 @@ export async function chargeSessionWrite(
 	mailbox: string,
 	bytes: number,
 	deleteId?: string | null,
+	rowKey?: string | null,
 ): Promise<StorageHold> {
 	return holdMailboxBytes(c.env, mailbox, bytes, {
 		owner: c.get("authOwner"),
 		plan: c.get("authPlan"),
 		deleteId,
+		rowKey,
 	});
 }

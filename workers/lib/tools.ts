@@ -37,8 +37,8 @@ import type { Env } from "../types";
 
 const STORAGE_QUOTA_ERROR = "Account storage quota exceeded. Delete mail to free space. Existing mail is kept.";
 
-async function admitBody(env: Env, mailboxId: string, body: string, subject = "", fields: StoredMailFields = {}) {
-	const hold = await holdMailboxBytes(env, mailboxId, storedMailBytes(body, 0, subject, fields));
+async function admitBody(env: Env, mailboxId: string, body: string, subject = "", fields: StoredMailFields = {}, rowKey?: string) {
+	const hold = await holdMailboxBytes(env, mailboxId, storedMailBytes(body, 0, subject, fields), { rowKey });
 	if (!hold.ok) return { ok: false as const, error: STORAGE_QUOTA_ERROR };
 	return hold;
 }
@@ -184,7 +184,7 @@ export async function toolDraftReply(
 		date: draftedAt,
 		inReplyTo: params.originalEmailId,
 		threadId,
-	});
+	}, `${mailboxId}/${draftId}`);
 	if (!hold.ok) return hold;
 
 	try {
@@ -276,7 +276,7 @@ export async function toolDraftEmail(
 		date: draftedAt,
 		inReplyTo: params.in_reply_to,
 		threadId: resolvedThreadId,
-	});
+	}, `${mailboxId}/${draftId}`);
 	if (!hold.ok) return hold;
 	try {
 	await stub.createEmail(
@@ -370,7 +370,7 @@ export async function toolUpdateDraft(
 	});
 	const owner = await accountOwner(env, mailboxId);
 	const removal = oldBytes > 0 ? await beginStorageDelete(env, owner, oldBytes, `${mailboxId}/${params.draftId}`) : null;
-	const hold = nextBytes > 0 ? await holdMailboxBytes(env, mailboxId, nextBytes, { deleteId: removal }) : null;
+	const hold = nextBytes > 0 ? await holdMailboxBytes(env, mailboxId, nextBytes, { deleteId: removal, rowKey: `${mailboxId}/${newDraftId}` }) : null;
 	if (hold && !hold.ok) {
 		await abortStorageDelete(env, owner, removal);
 		return { error: STORAGE_QUOTA_ERROR };
@@ -608,7 +608,7 @@ export async function toolSendReply(
 		references: referencesJson,
 		threadId,
 		messageId: outgoingMessageId,
-	});
+	}, `${mailboxId}/${messageId}`);
 	if (!hold.ok) return hold;
 
 	try {
@@ -688,7 +688,7 @@ export async function toolSendEmail(
 		recipient: params.to.toLowerCase(),
 		date: sentAt,
 		messageId: outgoingMessageId,
-	});
+	}, `${mailboxId}/${messageId}`);
 	if (!hold.ok) return hold;
 
 	try {

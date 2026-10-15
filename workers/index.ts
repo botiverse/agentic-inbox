@@ -117,7 +117,7 @@ async function deliverToInbox(
 	let hold: { release: () => Promise<void>; commit: () => Promise<void> } | undefined;
 	if (!opts?.storageHeld) {
 		const bytes = storedRowBytes(email, attachments.reduce((sum, att) => sum + attachmentRecordBytes(att), 0));
-		const reserved = await holdMailboxBytes(env, mailbox, bytes);
+		const reserved = await holdMailboxBytes(env, mailbox, bytes, email.id ? { rowKey: `${mailbox}/${email.id}` } : undefined);
 		if (!reserved.ok) return { created: false, id: email.id, quotaExceeded: true, used: reserved.used, limit: reserved.limit };
 		hold = reserved;
 	}
@@ -500,6 +500,8 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 			messageId: outgoingMessageId,
 			rawHeaders: sentHeaders,
 		}),
+		undefined,
+		`${mailboxId}/${messageId}`,
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	const sendDenied = await reserveAuthenticatedSend(c);
@@ -643,7 +645,8 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			{ key: "x-agentic-inbox-delivery", value: "internal" },
 		]),
 	};
-	const senderHold = await chargeSessionWrite(c, from, storedRowBytes(common));
+	const sentCopyId = crypto.randomUUID();
+	const senderHold = await chargeSessionWrite(c, from, storedRowBytes(common), undefined, `${from}/${sentCopyId}`);
 	if (!senderHold.ok) return storageQuotaResponse(senderHold);
 	const sendDenied = await reserveAuthenticatedSend(c);
 	if (sendDenied) {
@@ -665,7 +668,6 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			await senderHold.release();
 			return storageQuotaResponse({ ok: false, used: created.used ?? 0, limit: created.limit ?? 0 });
 		}
-		const sentCopyId = crypto.randomUUID();
 		try {
 			await c.var.mailboxStub.createEmail(Folders.SENT, { id: sentCopyId, ...common }, []);
 		} catch (e) {
@@ -703,7 +705,6 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 		return c.json({ error: `External send failed: ${msg}`, code: "SEND_FAILED", to }, 502);
 	}
 	// Only record it as Sent once the provider accepted it.
-	const sentCopyId = crypto.randomUUID();
 	try {
 	await c.var.mailboxStub.createEmail(Folders.SENT, {
 		id: sentCopyId,
@@ -741,7 +742,7 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	// Name the old row's bytes before anyone deletes it. The reserve below is the
 	// next await that loses the draft; do not add another await after it returns.
 	const removal = draft_id && oldBytes > 0 ? await beginStorageDelete(c.env, owner, oldBytes, `${mailboxId}/${draft_id}`) : null;
-	const held = nextBytes > 0 ? await chargeSessionWrite(c, mailboxId, nextBytes, removal) : null;
+	const held = nextBytes > 0 ? await chargeSessionWrite(c, mailboxId, nextBytes, removal, `${mailboxId}/${messageId}`) : null;
 	if (held && !held.ok) {
 		await abortStorageDelete(c.env, owner, removal);
 		return storageQuotaResponse(held);
@@ -1114,6 +1115,7 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 			size: item.size, filename: item.filename, mimetype: item.att.mimeType,
 			contentId: item.att.contentId, disposition: item.att.disposition || "attachment",
 		}), 0)),
+		{ rowKey: `${deliveryAddress}/${messageId}` },
 	);
 	if (!inboundHold.ok) {
 		// Cloudflare's setReject only takes a reason string. The text carries 552,

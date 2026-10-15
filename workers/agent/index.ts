@@ -499,7 +499,7 @@ Based on the email content and thread context above, draft a reply using draft_r
 						date: draftedAt,
 						inReplyTo: emailData.emailId,
 						threadId: emailData.threadId,
-					}));
+					}), { rowKey: `${emailData.mailboxId}/${draftId}` });
 					if (!draftHold.ok) {
 						console.error("Auto-draft skipped: storage quota exceeded");
 					} else {

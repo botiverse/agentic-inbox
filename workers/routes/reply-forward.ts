@@ -81,6 +81,8 @@ export async function handleReplyEmail(c: AppContext) {
 			inReplyTo: originalMsgId, references: JSON.stringify(references), threadId: thread_id,
 			messageId: outgoingMessageId, rawHeaders: replyHeaders,
 		}),
+		undefined,
+		`${mailboxId}/${messageId}`,
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	const sendDenied = await reserveAuthenticatedSend(c);
@@ -219,6 +221,8 @@ export async function handleForwardEmail(c: AppContext) {
 			sender: fromEmail, recipient: toStr, cc: ccStored, bcc: bccStored, date: sentAt,
 			messageId: outgoingMessageId, rawHeaders: forwardHeaders,
 		}),
+		undefined,
+		`${mailboxId}/${messageId}`,
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	const sendDenied = await reserveAuthenticatedSend(c);
