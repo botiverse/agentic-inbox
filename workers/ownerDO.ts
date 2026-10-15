@@ -395,8 +395,10 @@ export class OwnerDO extends DurableObject<Env> {
 	/** Remember object keys whose bytes stayed charged because delete was not confirmed.
 	 * `holdId`, when set, is retired here so only this orphan record can credit those bytes.
 	 * `deleteId`, when set, moves that delete's refund onto this orphan in the same
-	 * transaction. A later complete or abort of the delete cannot credit it again.
-	 * A repeat call for the same delete id appends nothing. */
+	 * transaction, and retires the row's original create hold without subtracting.
+	 * The orphan owns the only refund. Cancelling the hold or completing the delete
+	 * after that, before or after the sweep, must not subtract. A repeat call for
+	 * the same delete id appends nothing. */
 	async retainOrphans(keys: string[], bytes: number, holdId?: string, deleteId?: string): Promise<void> {
 		if (keys.length === 0 || bytes <= 0) return;
 		const record: OrphanRecord = { id: crypto.randomUUID(), keys, bytes: Math.floor(bytes) };
@@ -422,6 +424,9 @@ export class OwnerDO extends DurableObject<Env> {
 				if (credit <= 0) return;
 				record.bytes = credit;
 				record.deleteId = deleteId;
+				// The create hold is the same charge. Retire it here, with no counter
+				// change. Only the orphan sweep subtracts, once R2 delete succeeds.
+				if (rec.row) await this.retireRowHold(tx, rec.row);
 			}
 			pending.push(record);
 			await tx.put("storage:orphans", pending);

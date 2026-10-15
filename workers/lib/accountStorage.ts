@@ -99,7 +99,8 @@ export async function holdMailboxBytes(
 
 /** Keep the charge and the object keys when R2 cleanup cannot be confirmed.
  * `holdId` is retired with the record so a later cancel cannot credit those bytes too.
- * `deleteId` moves that prepared delete's refund onto the orphan in one transaction. */
+ * `deleteId` moves that prepared delete's refund, and the row's original create hold,
+ * onto the orphan in one transaction. The sweep is the only subtract. */
 export async function rememberOrphans(
 	env: Env,
 	owner: string,
