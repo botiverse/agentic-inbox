@@ -31,6 +31,8 @@ import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDoma
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { abortStorageDelete, accountOwner, attachmentRecordBytes, beginStorageDelete, chargeSessionWrite, finishStorageDelete, holdMailboxBytes, rememberOrphans, storageQuotaResponse, storedMailBytes, storedRowBytes } from "./lib/accountStorage";
+import { checkSendPlan, reserveAuthenticatedSend } from "./lib/sendPolicy";
+import { MIN_MAILBOX_LOCAL_PART_LENGTH } from "../shared/mailPolicy";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
 import { requireMailbox, type MailboxContext } from "./lib/mailbox";
@@ -162,6 +164,16 @@ app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 // `/*` pattern above only matches sub-paths, so without this a caller could
 // read/modify/delete a mailbox they don't own.
 app.use("/api/v1/mailboxes/:mailboxId", requireMailbox);
+// All public send paths share the same plan gate; ownership is checked first.
+// A request with no session is rejected by the login wall before it reaches
+// this router in production. Direct storage tests call the router without one.
+app.use("/api/v1/mailboxes/:mailboxId/*", async (c, next) => {
+	if (c.get("authOwner") && c.req.method === "POST" && /^\/api\/v1\/mailboxes\/[^/]+\/(?:send|emails|emails\/[^/]+\/(?:reply|forward))$/.test(c.req.path)) {
+		const denied = checkSendPlan(c);
+		if (denied) return denied;
+	}
+	await next();
+});
 
 // -- Config ---------------------------------------------------------
 
@@ -304,6 +316,16 @@ app.post("/api/v1/mailboxes", async (c) => {
 			return c.json({ error: "Mailbox already exists and is owned by another account", code: "MAILBOX_TAKEN" }, 409);
 		}
 		// action === "adopt": fall through.
+	}
+
+	// Keep existing owned short addresses usable, but reject new claims/adoptions.
+	if (localPart.length < MIN_MAILBOX_LOCAL_PART_LENGTH) {
+		return c.json({
+			code: "LOCALPART_TOO_SHORT",
+			error: `New mailbox names must have at least ${MIN_MAILBOX_LOCAL_PART_LENGTH} characters before @. Use a longer suffix within your namespace.`,
+			minLength: MIN_MAILBOX_LOCAL_PART_LENGTH,
+			namespace: namespace || undefined,
+		}, 400);
 	}
 
 	const adopting = existingSettings !== null;
@@ -478,6 +500,11 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 		}),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
+	const sendDenied = await reserveAuthenticatedSend(c);
+	if (sendDenied) {
+		await held.release();
+		return sendDenied;
+	}
 	let attachmentData: Awaited<ReturnType<typeof storeAttachments>> | undefined;
 	try {
 		attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
@@ -610,6 +637,11 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	};
 	const senderHold = await chargeSessionWrite(c, from, storedRowBytes(common));
 	if (!senderHold.ok) return storageQuotaResponse(senderHold);
+	const sendDenied = await reserveAuthenticatedSend(c);
+	if (sendDenied) {
+		await senderHold.release();
+		return sendDenied;
+	}
 	if (isInternal) {
 		// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
 		// The recipient's copy is charged to the recipient's account inside deliverToInbox.

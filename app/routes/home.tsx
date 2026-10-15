@@ -24,6 +24,7 @@ import {
 	useMailboxes,
 } from "~/queries/mailboxes";
 import { queryKeys } from "~/queries/keys";
+import { MIN_MAILBOX_LOCAL_PART_LENGTH } from "../../shared/mailPolicy";
 
 export function meta() {
 	return [{ title: "mail.build" }];
@@ -68,6 +69,10 @@ export default function HomeRoute() {
 		setCreateError(null);
 		if (!newPrefix || !selectedDomain) {
 			setCreateError("Please fill in all fields");
+			return;
+		}
+		if (newPrefix.length < MIN_MAILBOX_LOCAL_PART_LENGTH) {
+			setCreateError(`Use at least ${MIN_MAILBOX_LOCAL_PART_LENGTH} characters before @.`);
 			return;
 		}
 		const email = `${newPrefix}@${selectedDomain}`;
@@ -188,8 +193,8 @@ export default function HomeRoute() {
 								No mailboxes yet
 							</h3>
 							<p className="text-sm text-kumo-subtle max-w-sm mb-5">
-								Claim a mailbox under your handle to start sending and
-								receiving email — e.g. <code>you@{selectedDomain || "mail.build"}</code>.
+								Claim a mailbox under your handle to receive email.
+								Use at least 8 characters before @ — e.g. <code>you-inbox@{selectedDomain || "mail.build"}</code>.
 							</p>
 							<Button
 								variant="primary"
@@ -223,7 +228,8 @@ export default function HomeRoute() {
 								<div className="flex-1">
 									<Input
 										aria-label="Address prefix"
-										placeholder="info"
+										placeholder="your-inbox"
+										minLength={MIN_MAILBOX_LOCAL_PART_LENGTH}
 										size="sm"
 										value={newPrefix}
 										onChange={(e) => setNewPrefix(e.target.value)}

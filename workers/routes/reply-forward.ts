@@ -19,6 +19,7 @@ import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
 import { flagContext, sendRateLimits } from "../lib/flags";
 import { attachmentRecordBytes, chargeSessionWrite, rememberOrphans, storageQuotaResponse, storedMailBytes } from "../lib/accountStorage";
+import { reserveAuthenticatedSend } from "../lib/sendPolicy";
 
 type AppContext = Context<MailboxContext>;
 type RateLimitStub = { checkSendRateLimit: (limits?: { perHour: number; perDay: number }) => Promise<string | null> };
@@ -82,6 +83,11 @@ export async function handleReplyEmail(c: AppContext) {
 		}),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
+	const sendDenied = await reserveAuthenticatedSend(c);
+	if (sendDenied) {
+		await held.release();
+		return sendDenied;
+	}
 	let stored = false;
 	let attachmentData: StoredAttachment[] | undefined;
 	try {
@@ -211,6 +217,11 @@ export async function handleForwardEmail(c: AppContext) {
 		}),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
+	const sendDenied = await reserveAuthenticatedSend(c);
+	if (sendDenied) {
+		await held.release();
+		return sendDenied;
+	}
 	let stored = false;
 	let attachmentData: StoredAttachment[] | undefined;
 	try {
