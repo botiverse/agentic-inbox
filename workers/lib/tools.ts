@@ -32,6 +32,7 @@ import { Folders } from "../../shared/folders";
 import { flagContext, sendRateLimits } from "./flags";
 import { AttachmentCleanupError, attachmentObjectKeys, discardAttachmentObjects } from "./attachments";
 import { abortStorageDelete, accountOwner, beginStorageDelete, finishStorageDelete, holdMailboxBytes, rememberOrphans, settleCreateHold, storedMailBytes } from "./accountStorage";
+import { storageRowKey } from "./mailboxRef";
 import type { StoredMailFields } from "./storageQuota";
 import type { Env } from "../types";
 
@@ -184,7 +185,7 @@ export async function toolDraftReply(
 		date: draftedAt,
 		inReplyTo: params.originalEmailId,
 		threadId,
-	}, `${mailboxId}/${draftId}`);
+	}, storageRowKey(mailboxId, draftId));
 	if (!hold.ok) return hold;
 
 	try {
@@ -276,7 +277,7 @@ export async function toolDraftEmail(
 		date: draftedAt,
 		inReplyTo: params.in_reply_to,
 		threadId: resolvedThreadId,
-	}, `${mailboxId}/${draftId}`);
+	}, storageRowKey(mailboxId, draftId));
 	if (!hold.ok) return hold;
 	try {
 	await stub.createEmail(
@@ -369,8 +370,8 @@ export async function toolUpdateDraft(
 		rawHeaders: oldDraft.raw_headers,
 	});
 	const owner = await accountOwner(env, mailboxId);
-	const removal = oldBytes > 0 ? await beginStorageDelete(env, owner, oldBytes, `${mailboxId}/${params.draftId}`) : null;
-	const hold = nextBytes > 0 ? await holdMailboxBytes(env, mailboxId, nextBytes, { deleteId: removal, rowKey: `${mailboxId}/${newDraftId}` }) : null;
+	const removal = oldBytes > 0 ? await beginStorageDelete(env, owner, oldBytes, storageRowKey(mailboxId, params.draftId)) : null;
+	const hold = nextBytes > 0 ? await holdMailboxBytes(env, mailboxId, nextBytes, { deleteId: removal, rowKey: storageRowKey(mailboxId, newDraftId) }) : null;
 	if (hold && !hold.ok) {
 		await abortStorageDelete(env, owner, removal);
 		return { error: STORAGE_QUOTA_ERROR };
@@ -485,7 +486,7 @@ export async function toolDiscardDraft(
 	}
 	const bytes = (await stub.measureEmailBytes(draftId)) ?? 0;
 	const owner = await accountOwner(env, mailboxId);
-	const deletion = await beginStorageDelete(env, owner, bytes, `${mailboxId}/${draftId}`);
+	const deletion = await beginStorageDelete(env, owner, bytes, storageRowKey(mailboxId, draftId));
 	let removed!: Awaited<ReturnType<typeof stub.deleteEmail>>;
 	try {
 		removed = await stub.deleteEmail(draftId);
@@ -526,7 +527,7 @@ export async function toolDeleteEmail(
 		return { error: "Email not found", emailId };
 	}
 	const owner = await accountOwner(env, mailboxId);
-	const deletion = await beginStorageDelete(env, owner, bytes, `${mailboxId}/${emailId}`);
+	const deletion = await beginStorageDelete(env, owner, bytes, storageRowKey(mailboxId, emailId));
 	let result!: Awaited<ReturnType<typeof stub.deleteEmail>>;
 	try {
 		result = await stub.deleteEmail(emailId);
@@ -608,7 +609,7 @@ export async function toolSendReply(
 		references: referencesJson,
 		threadId,
 		messageId: outgoingMessageId,
-	}, `${mailboxId}/${messageId}`);
+	}, storageRowKey(mailboxId, messageId));
 	if (!hold.ok) return hold;
 
 	try {
@@ -688,7 +689,7 @@ export async function toolSendEmail(
 		recipient: params.to.toLowerCase(),
 		date: sentAt,
 		messageId: outgoingMessageId,
-	}, `${mailboxId}/${messageId}`);
+	}, storageRowKey(mailboxId, messageId));
 	if (!hold.ok) return hold;
 
 	try {

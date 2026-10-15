@@ -2,7 +2,7 @@ import type { Context } from "hono";
 import type { Env } from "../types";
 import { attachmentObjectKeys, discardAttachmentObjects, type StoredAttachment } from "./attachments";
 import type { MailboxContext } from "./mailbox";
-import { readMailboxSettings } from "./mailboxRef";
+import { readMailboxSettings, storageRowKey } from "./mailboxRef";
 import { attachmentRecordBytes, storageLimitBytes, storedMailBytes, storedRowBytes, type StorageAdmission } from "./storageQuota";
 
 export { attachmentRecordBytes, storedMailBytes, storedRowBytes, storageLimitBytes };
@@ -24,6 +24,13 @@ function ownerStub(env: Env, owner: string) {
 	return env.OWNER.get(env.OWNER.idFromName(owner));
 }
 
+/** One row has one charge, whichever alias the request wrote. The row id is not rewritten. */
+function canonicalChargeKey(rowKey: string): string {
+	const slash = rowKey.indexOf("/");
+	if (slash <= 0) return rowKey;
+	return storageRowKey(rowKey.slice(0, slash), rowKey.slice(slash + 1));
+}
+
 /** The account that pays for a mailbox. Ownerless mailboxes get their own free cap. */
 export async function accountOwner(env: Env, mailbox: string, explicit?: string | null): Promise<string> {
 	if (explicit) return explicit;
@@ -42,7 +49,7 @@ export async function holdStorage(
 	const stub = ownerStub(env, owner);
 	if (plan) await stub.rememberPlan(plan);
 	const effective = plan ?? (await stub.plan());
-	const decision = await stub.reserveStorage(owner, bytes, storageLimitBytes(effective), deleteId || undefined, rowKey || undefined);
+	const decision = await stub.reserveStorage(owner, bytes, storageLimitBytes(effective), deleteId || undefined, rowKey ? canonicalChargeKey(rowKey) : undefined);
 	if (!decision.ok) return { ok: false, used: decision.used, limit: decision.limit };
 	const id = decision.id ?? "";
 	let settled = false;
@@ -73,7 +80,7 @@ export async function beginStorageDelete(
 	rowKey?: string,
 ): Promise<string | null> {
 	if (bytes <= 0) return null;
-	const opened = await ownerStub(env, owner).openStorageDelete(owner, bytes, rowKey);
+	const opened = await ownerStub(env, owner).openStorageDelete(owner, bytes, rowKey ? canonicalChargeKey(rowKey) : undefined);
 	return opened.id || null;
 }
 

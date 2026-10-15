@@ -19,6 +19,7 @@ import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
 import { flagContext, sendRateLimits } from "../lib/flags";
 import { attachmentRecordBytes, chargeSessionWrite, rememberOrphans, settleAttemptedCreate, storageQuotaResponse, storedMailBytes } from "../lib/accountStorage";
+import { storageRowKey } from "../lib/mailboxRef";
 import { reserveAuthenticatedSend } from "../lib/sendPolicy";
 
 type AppContext = Context<MailboxContext>;
@@ -82,7 +83,7 @@ export async function handleReplyEmail(c: AppContext) {
 			messageId: outgoingMessageId, rawHeaders: replyHeaders,
 		}),
 		undefined,
-		`${mailboxId}/${messageId}`,
+		storageRowKey(mailboxId, messageId),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	const sendDenied = await reserveAuthenticatedSend(c);
@@ -222,7 +223,7 @@ export async function handleForwardEmail(c: AppContext) {
 			messageId: outgoingMessageId, rawHeaders: forwardHeaders,
 		}),
 		undefined,
-		`${mailboxId}/${messageId}`,
+		storageRowKey(mailboxId, messageId),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	const sendDenied = await reserveAuthenticatedSend(c);

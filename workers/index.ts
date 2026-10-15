@@ -22,7 +22,7 @@ import {
 	withUntrusted,
 } from "./lib/email-helpers";
 import { settingsWithNotify, publicInboxNotify, applySettingsUpdate } from "./lib/inboxNotify";
-import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
+import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings, storageRowKey } from "./lib/mailboxRef";
 import { runInboundNotify } from "./lib/agentEvents";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
@@ -117,7 +117,7 @@ async function deliverToInbox(
 	let hold: { release: () => Promise<void>; commit: () => Promise<void> } | undefined;
 	if (!opts?.storageHeld) {
 		const bytes = storedRowBytes(email, attachments.reduce((sum, att) => sum + attachmentRecordBytes(att), 0));
-		const reserved = await holdMailboxBytes(env, mailbox, bytes, email.id ? { rowKey: `${mailbox}/${email.id}` } : undefined);
+		const reserved = await holdMailboxBytes(env, mailbox, bytes, email.id ? { rowKey: storageRowKey(mailbox, email.id) } : undefined);
 		if (!reserved.ok) return { created: false, id: email.id, quotaExceeded: true, used: reserved.used, limit: reserved.limit };
 		hold = reserved;
 	}
@@ -501,7 +501,7 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 			rawHeaders: sentHeaders,
 		}),
 		undefined,
-		`${mailboxId}/${messageId}`,
+		storageRowKey(mailboxId, messageId),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
 	const sendDenied = await reserveAuthenticatedSend(c);
@@ -646,7 +646,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 		]),
 	};
 	const sentCopyId = crypto.randomUUID();
-	const senderHold = await chargeSessionWrite(c, from, storedRowBytes(common), undefined, `${from}/${sentCopyId}`);
+	const senderHold = await chargeSessionWrite(c, from, storedRowBytes(common), undefined, storageRowKey(from, sentCopyId));
 	if (!senderHold.ok) return storageQuotaResponse(senderHold);
 	const sendDenied = await reserveAuthenticatedSend(c);
 	if (sendDenied) {
@@ -741,8 +741,8 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	const oldBytes = draft_id ? (await stub.measureEmailBytes(draft_id) ?? 0) : 0;
 	// Name the old row's bytes before anyone deletes it. The reserve below is the
 	// next await that loses the draft; do not add another await after it returns.
-	const removal = draft_id && oldBytes > 0 ? await beginStorageDelete(c.env, owner, oldBytes, `${mailboxId}/${draft_id}`) : null;
-	const held = nextBytes > 0 ? await chargeSessionWrite(c, mailboxId, nextBytes, removal, `${mailboxId}/${messageId}`) : null;
+	const removal = draft_id && oldBytes > 0 ? await beginStorageDelete(c.env, owner, oldBytes, storageRowKey(mailboxId, draft_id)) : null;
+	const held = nextBytes > 0 ? await chargeSessionWrite(c, mailboxId, nextBytes, removal, storageRowKey(mailboxId, messageId)) : null;
 	if (held && !held.ok) {
 		await abortStorageDelete(c.env, owner, removal);
 		return storageQuotaResponse(held);
@@ -836,7 +836,7 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 	const bytes = await c.var.mailboxStub.measureEmailBytes(id);
 	if (bytes === null) return c.json({ error: "Not found" }, 404);
 	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
-	const deletion = await beginStorageDelete(c.env, owner, bytes, `${mailboxId}/${id}`);
+	const deletion = await beginStorageDelete(c.env, owner, bytes, storageRowKey(mailboxId, id));
 	let deleted = false;
 	let cleanupFailed = false;
 	let refundMoved = false;
@@ -1115,7 +1115,7 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 			size: item.size, filename: item.filename, mimetype: item.att.mimeType,
 			contentId: item.att.contentId, disposition: item.att.disposition || "attachment",
 		}), 0)),
-		{ rowKey: `${deliveryAddress}/${messageId}` },
+		{ rowKey: storageRowKey(deliveryAddress, messageId) },
 	);
 	if (!inboundHold.ok) {
 		// Cloudflare's setReject only takes a reason string. The text carries 552,
