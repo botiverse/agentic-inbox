@@ -24,7 +24,7 @@
 		// Used for BOTH the setup client_id AND token-endpoint Basic auth — NEVER the
 		// internal app UUID (that mismatch was the slock-internal-dashboard PR #66 403).
 		// RAFT_OAUTH_CLIENT_SECRET + RAFT_SESSION_SECRET are wrangler secrets (not here).
-		// The integration service name in the agent manifest stays "agentic-inbox".
+		// The agent manifest service name is "mail", matching this Connected App.
 		"RAFT_OAUTH_CLIENT_KEY": "mail",
 		"RAFT_API_ORIGIN": "https://api.raft.build",
 		"RAFT_APP_ORIGIN": "https://app.raft.build",

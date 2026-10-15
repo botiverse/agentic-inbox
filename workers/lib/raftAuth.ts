@@ -138,7 +138,7 @@ export async function exchangeAgentRequest(
 			"missing_code",
 			400,
 			"Missing request_id in agent OAuth callback.",
-			"Retry raft integration login --service agentic-inbox.",
+			"Retry raft integration login --service mail.",
 		);
 	}
 	return postToken(config, new URLSearchParams({ grant_type: "urn:slock:grant-type:agent_request", request_id: requestId }), fetchImpl);
