@@ -832,6 +832,11 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 				await discardAttachmentObjects(c.env.BUCKET, id, attachments);
 			} catch (e) {
 				console.error("attachment cleanup failed:", (e as Error).message);
+				// The row is gone and the objects are not. The orphan record owns the
+				// one later credit; the open delete must not lend this gap to anyone else.
+				await rememberOrphans(c.env, owner, attachmentObjectKeys(id, attachments), bytes).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
 				await abortStorageDelete(c.env, owner, deletion);
 				return c.json({ error: "Attachment cleanup failed. Storage quota was kept.", code: "ATTACHMENT_CLEANUP_FAILED" }, 500);
 			}

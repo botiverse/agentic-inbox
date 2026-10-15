@@ -21,10 +21,12 @@ it('a delayed deletion refund cannot take bytes reserved by a different in-fligh
   // Name this deletion before the row disappears. Its refund stays delayed.
   const deletion=await account.openStorageDelete(owner,20);
   await box.setUsage(80);
-  // Another request reserves 20. Its R2/row write is not finished.
-  const pending=await account.reserveStorage(owner,20,100);
-  if(!pending.ok)throw new Error('setup reservation should fit');
+  // Settlement is not confirmed yet, so this reservation waits.
+  const early=await account.reserveStorage(owner,20,100);
+  if(early.ok)throw new Error('reservation must wait until the delete settles');
   await account.completeStorageDelete(owner,deletion.id);
+  const pending=await account.reserveStorage(owner,20,100);
+  if(!pending.ok)throw new Error('settled delete should free its own bytes');
   const beforeCommit=(await account.reserveStorage(owner,0,100)).used;
   // The admitted write now completes; it must still have its 20-byte reservation.
   await box.setUsage(100);

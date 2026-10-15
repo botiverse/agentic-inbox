@@ -496,6 +496,9 @@ export async function toolDiscardDraft(
 			await discardAttachmentObjects(env.BUCKET, draftId, removed);
 		} catch (e) {
 			console.error("draft attachment cleanup failed:", (e as Error).message);
+			await rememberOrphans(env, owner, attachmentObjectKeys(draftId, removed), bytes).catch((err) => {
+				console.error("orphan record failed:", (err as Error).message);
+			});
 			await abortStorageDelete(env, owner, deletion);
 			return { error: "Attachment cleanup failed. Storage quota was kept.", draftId };
 		}
@@ -534,6 +537,9 @@ export async function toolDeleteEmail(
 			await discardAttachmentObjects(env.BUCKET, emailId, result);
 		} catch (e) {
 			console.error("attachment cleanup failed:", (e as Error).message);
+			await rememberOrphans(env, owner, attachmentObjectKeys(emailId, result), bytes).catch((err) => {
+				console.error("orphan record failed:", (err as Error).message);
+			});
 			await abortStorageDelete(env, owner, deletion);
 			return { error: "Attachment cleanup failed. Storage quota was kept.", emailId };
 		}

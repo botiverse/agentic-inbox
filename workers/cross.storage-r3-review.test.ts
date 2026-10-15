@@ -28,9 +28,13 @@ it('another write seeding between physical deletion and its refund cannot double
   await box.setUsage(100);
   const op=await account.openStorageDelete(owner,20);
   await box.setUsage(80);
-  await account.reserveStorage(owner,1,100);
-  await box.setUsage(81);
+  const early=await account.reserveStorage(owner,1,100);
+  if(early.ok)throw new Error('reservation must wait until the delete settles');
   await account.completeStorageDelete(owner,op.id);
+  const pending=await account.reserveStorage(owner,1,100);
+  if(!pending.ok)throw new Error('settled delete should free its own bytes');
+  await box.setUsage(81);
+  await account.commitStorage(owner,pending.id);
   return Response.json({counter:(await account.reserveStorage(owner,0,100)).used,actual:await box.usageBytes()});
  `,r=>expect(r).toEqual({counter:81,actual:81}));
 },30000);

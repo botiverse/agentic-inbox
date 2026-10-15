@@ -223,28 +223,6 @@ export class OwnerDO extends DurableObject<Env> {
 		return Number((await tx.get<number>("storage:used")) ?? 0);
 	}
 
-	/**
-	 * Bytes still stored: registered mailboxes, plus retained snapshots.
-	 * A retained snapshot includes writes that were reserved when the slot was
-	 * released and have not been cancelled. Orphan objects are not in here.
-	 */
-	private async accountedLive(
-		owner: string,
-		map: Record<string, string>,
-		retained: Record<string, RetainedRec | number>,
-	): Promise<number> {
-		let total = 0;
-		const seen = new Set<string>();
-		for (const email of this.addressesFor(owner, map)) {
-			seen.add(email);
-			total += await this.mailboxUsage(email);
-		}
-		for (const [email, value] of Object.entries(retained)) {
-			if (!seen.has(email)) total += retainedTotal(asRetained(value));
-		}
-		return total;
-	}
-
 	/** Move a reserved write into a retained snapshot, or drop it if the reserve was cancelled. */
 	private async settleRetainedHold(tx: StorageTx, id: string, commit: boolean): Promise<void> {
 		const retained = (await tx.get<Record<string, RetainedRec | number>>(RETAINED_KEY)) ?? {};
@@ -274,17 +252,12 @@ export class OwnerDO extends DurableObject<Env> {
 			const used = await this.reported(tx);
 			if (add <= 0) return { ok: true, used, limit };
 			const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
-			const map = (await tx.get<Record<string, string>>("mailboxes")) ?? {};
-			const retained = (await tx.get<Record<string, number>>(RETAINED_KEY)) ?? {};
-			const live = await this.accountedLive(owner, map, retained);
 			const deletes = (await tx.get<Record<string, DeleteRec>>(DELETES_KEY)) ?? {};
-			const orphans = (await tx.get<OrphanRecord[]>("storage:orphans")) ?? [];
-			// A low scan releases quota only for bytes an open delete still names,
-			// and only after orphans and outstanding holds are still counted.
-			// An orphan or a write that landed after release is not that evidence.
-			const gap = Math.max(0, used - sumValues(holds) - live - orphanBytes(orphans));
-			const reclaimed = Math.min(openDeleteBytes(deletes), gap);
-			const visible = Math.max(0, used - reclaimed);
+			// The counter is the charge. It drops only when the operation that owns
+			// those bytes confirms reclamation: completeStorageDelete, or an orphan
+			// sweep after R2 delete succeeds. An open delete is not that confirmation,
+			// and neither is a mailbox scan that no longer sees a row.
+			const visible = used;
 			const prepared = deleteId ? asDelete(deletes[deleteId]) : null;
 			const exclusive = prepared && !prepared.claimed && prepared.credit > 0 ? prepared.credit : 0;
 			if (visible - exclusive + add > limit) return { ok: false, used, limit };
@@ -472,21 +445,6 @@ function asRetained(value: RetainedRec | number | undefined): RetainedRec {
 
 function retainedTotal(rec: RetainedRec): number {
 	return rec.bytes + sumValues(rec.pending);
-}
-
-function openDeleteBytes(deletes: Record<string, DeleteRec | number>): number {
-	let total = 0;
-	for (const value of Object.values(deletes)) {
-		const rec = asDelete(value);
-		if (rec) total += Math.max(0, Math.floor(rec.bytes));
-	}
-	return total;
-}
-
-function orphanBytes(rows: OrphanRecord[]): number {
-	let total = 0;
-	for (const row of rows) total += Math.max(0, Math.floor(row.bytes));
-	return total;
 }
 
 function asDelete(value: DeleteRec | number | undefined): DeleteRec | null {
