@@ -753,7 +753,7 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 				} catch (cleanupErr) {
 					console.error("draft attachment cleanup failed:", (cleanupErr as Error).message);
 					const keys = attachmentObjectKeys(draft_id, removed);
-					await rememberOrphans(c.env, owner, keys, oldBytes).catch((err) => {
+					await rememberOrphans(c.env, owner, keys, oldBytes, undefined, removal).catch((err) => {
 						console.error("orphan record failed:", (err as Error).message);
 					});
 					await abortStorageDelete(c.env, owner, removal);
@@ -819,6 +819,8 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
 	const deletion = await beginStorageDelete(c.env, owner, bytes, `${mailboxId}/${id}`);
 	let deleted = false;
+	let cleanupFailed = false;
+	let refundMoved = false;
 	try {
 		const attachments = await c.var.mailboxStub.deleteEmail(id);
 		if (attachments === null) {
@@ -831,12 +833,17 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 			try {
 				await discardAttachmentObjects(c.env.BUCKET, id, attachments);
 			} catch (e) {
+				cleanupFailed = true;
 				console.error("attachment cleanup failed:", (e as Error).message);
-				// The row is gone and the objects are not. The orphan record owns the
-				// one later credit; the open delete must not lend this gap to anyone else.
-				await rememberOrphans(c.env, owner, attachmentObjectKeys(id, attachments), bytes).catch((err) => {
+				// The row is gone and the objects are not. Move this delete's refund
+				// onto the orphan before abort. A later complete of the same id,
+				// including one reached because abort never got to the ledger, subtracts nothing.
+				try {
+					await rememberOrphans(c.env, owner, attachmentObjectKeys(id, attachments), bytes, undefined, deletion);
+					refundMoved = true;
+				} catch (err) {
 					console.error("orphan record failed:", (err as Error).message);
-				});
+				}
 				await abortStorageDelete(c.env, owner, deletion);
 				return c.json({ error: "Attachment cleanup failed. Storage quota was kept.", code: "ATTACHMENT_CLEANUP_FAILED" }, 500);
 			}
@@ -844,10 +851,11 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 		await finishStorageDelete(c.env, owner, deletion);
 		return c.body(null, 204);
 	} catch (e) {
-		// The row is still there. Drop the prepared delete so a later admission
-		// cannot treat it as free space. A delete that already removed the row
-		// settles instead; aborting it would leave the counter high forever.
-		if (deleted) await finishStorageDelete(c.env, owner, deletion);
+		// The row is still there when deleted is false. Drop the prepared delete.
+		// The row is gone only proves the mailbox row was removed. Complete the
+		// delete when cleanup succeeded, or when the orphan already owns the refund.
+		// If cleanup failed before that transfer, abort instead of refunding.
+		if (deleted && (!cleanupFailed || refundMoved)) await finishStorageDelete(c.env, owner, deletion);
 		else await abortStorageDelete(c.env, owner, deletion);
 		console.error("delete failed:", (e as Error).message);
 		return c.json({ error: "Delete failed. Storage quota was kept.", code: "DELETE_FAILED" }, 500);

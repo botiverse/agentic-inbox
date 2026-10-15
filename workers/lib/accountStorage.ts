@@ -96,16 +96,18 @@ export async function holdMailboxBytes(
 }
 
 /** Keep the charge and the object keys when R2 cleanup cannot be confirmed.
- * `holdId` is retired with the record so a later cancel cannot credit those bytes too. */
+ * `holdId` is retired with the record so a later cancel cannot credit those bytes too.
+ * `deleteId` moves that prepared delete's refund onto the orphan in one transaction. */
 export async function rememberOrphans(
 	env: Env,
 	owner: string,
 	keys: string[],
 	bytes: number,
 	holdId?: string,
+	deleteId?: string | null,
 ): Promise<void> {
 	if (keys.length === 0 || bytes <= 0) return;
-	await ownerStub(env, owner).retainOrphans(keys, bytes, holdId);
+	await ownerStub(env, owner).retainOrphans(keys, bytes, holdId, deleteId || undefined);
 }
 
 export function storageQuotaResponse(decision: Extract<StorageHold, { ok: false }> | StorageAdmission): Response {

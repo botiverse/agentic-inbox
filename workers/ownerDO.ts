@@ -335,7 +335,8 @@ export class OwnerDO extends DurableObject<Env> {
 		});
 	}
 
-	/** Credit one prepared delete. A second call finds the id gone and subtracts nothing. */
+	/** Credit one prepared delete. A second call finds the id gone and subtracts nothing.
+	 * A delete whose refund was moved onto an orphan subtracts nothing too. */
 	async completeStorageDelete(owner: string, id: string): Promise<{ used: number }> {
 		if (!id) return { used: await this.reported(this.ctx.storage) };
 		await this.sweepOrphans();
@@ -346,7 +347,8 @@ export class OwnerDO extends DurableObject<Env> {
 			if (rec) {
 				delete deletes[id];
 				await tx.put(DELETES_KEY, deletes);
-				const credit = Math.max(0, Math.floor(rec.bytes));
+				// orphanId means retainOrphans already owns this refund.
+				const credit = rec.orphanId ? 0 : Math.max(0, Math.floor(rec.bytes));
 				const used = Number((await tx.get<number>("storage:used")) ?? 0);
 				const next = Math.max(0, used - credit);
 				if (next !== used) await tx.put("storage:used", next);
@@ -369,10 +371,13 @@ export class OwnerDO extends DurableObject<Env> {
 	}
 
 	/** Remember object keys whose bytes stayed charged because delete was not confirmed.
-	 * `holdId`, when set, is retired here so only this orphan record can credit those bytes. */
-	async retainOrphans(keys: string[], bytes: number, holdId?: string): Promise<void> {
+	 * `holdId`, when set, is retired here so only this orphan record can credit those bytes.
+	 * `deleteId`, when set, moves that delete's refund onto this orphan in the same
+	 * transaction. A later complete or abort of the delete cannot credit it again.
+	 * A repeat call for the same delete id appends nothing. */
+	async retainOrphans(keys: string[], bytes: number, holdId?: string, deleteId?: string): Promise<void> {
 		if (keys.length === 0 || bytes <= 0) return;
-		const record = { id: crypto.randomUUID(), keys, bytes: Math.floor(bytes) };
+		const record: OrphanRecord = { id: crypto.randomUUID(), keys, bytes: Math.floor(bytes) };
 		await this.ctx.storage.transaction(async (tx) => {
 			if (holdId) {
 				const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
@@ -383,6 +388,19 @@ export class OwnerDO extends DurableObject<Env> {
 				}
 			}
 			const pending = (await tx.get<OrphanRecord[]>("storage:orphans")) ?? [];
+			if (deleteId) {
+				if (pending.some((row) => row.deleteId === deleteId)) return;
+				const deletes = (await tx.get<Record<string, DeleteRec>>(DELETES_KEY)) ?? {};
+				const rec = asDelete(deletes[deleteId]);
+				// Already moved, or the id was aborted or completed. Do not open a second refund.
+				if (rec?.orphanId || !rec) return;
+				const credit = Math.max(0, Math.floor(rec.bytes));
+				deletes[deleteId] = { ...rec, bytes: 0, credit: 0, claimed: true, orphanId: record.id };
+				await tx.put(DELETES_KEY, deletes);
+				if (credit <= 0) return;
+				record.bytes = credit;
+				record.deleteId = deleteId;
+			}
 			pending.push(record);
 			await tx.put("storage:orphans", pending);
 		});
@@ -431,9 +449,9 @@ type StorageTx = {
 	put<T>(key: string, value: T): Promise<void>;
 };
 
-type OrphanRecord = { id?: string; keys: string[]; bytes: number };
+type OrphanRecord = { id?: string; keys: string[]; bytes: number; deleteId?: string };
 
-type DeleteRec = { bytes: number; credit: number; row?: string; claimed?: boolean };
+type DeleteRec = { bytes: number; credit: number; row?: string; claimed?: boolean; orphanId?: string };
 
 type RetainedRec = { bytes: number; pending: Record<string, number> };
 

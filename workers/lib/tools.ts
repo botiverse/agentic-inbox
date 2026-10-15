@@ -390,7 +390,7 @@ export async function toolUpdateDraft(
 			} catch (cleanupErr) {
 				console.error("draft attachment cleanup failed:", (cleanupErr as Error).message);
 				const keys = attachmentObjectKeys(params.draftId, removed);
-				await rememberOrphans(env, owner, keys, oldBytes).catch((err) => {
+				await rememberOrphans(env, owner, keys, oldBytes, undefined, removal).catch((err) => {
 					console.error("orphan record failed:", (err as Error).message);
 				});
 				await abortStorageDelete(env, owner, removal);
@@ -496,7 +496,7 @@ export async function toolDiscardDraft(
 			await discardAttachmentObjects(env.BUCKET, draftId, removed);
 		} catch (e) {
 			console.error("draft attachment cleanup failed:", (e as Error).message);
-			await rememberOrphans(env, owner, attachmentObjectKeys(draftId, removed), bytes).catch((err) => {
+			await rememberOrphans(env, owner, attachmentObjectKeys(draftId, removed), bytes, undefined, deletion).catch((err) => {
 				console.error("orphan record failed:", (err as Error).message);
 			});
 			await abortStorageDelete(env, owner, deletion);
@@ -537,7 +537,7 @@ export async function toolDeleteEmail(
 			await discardAttachmentObjects(env.BUCKET, emailId, result);
 		} catch (e) {
 			console.error("attachment cleanup failed:", (e as Error).message);
-			await rememberOrphans(env, owner, attachmentObjectKeys(emailId, result), bytes).catch((err) => {
+			await rememberOrphans(env, owner, attachmentObjectKeys(emailId, result), bytes, undefined, deletion).catch((err) => {
 				console.error("orphan record failed:", (err as Error).message);
 			});
 			await abortStorageDelete(env, owner, deletion);
