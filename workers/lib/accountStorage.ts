@@ -10,7 +10,14 @@ type SessionPlan = "free" | "pro";
 
 export type StorageHold =
 	| { ok: false; used: number; limit: number }
-	| { ok: true; owner: string; bytes: number; release: () => Promise<void> };
+	| {
+			ok: true;
+			owner: string;
+			bytes: number;
+			id: string;
+			release: () => Promise<void>;
+			commit: () => Promise<void>;
+	  };
 
 function ownerStub(env: Env, owner: string) {
 	return env.OWNER.get(env.OWNER.idFromName(owner));
@@ -34,17 +41,41 @@ export async function holdStorage(
 	const effective = plan ?? (await stub.plan());
 	const decision = await stub.reserveStorage(owner, bytes, storageLimitBytes(effective));
 	if (!decision.ok) return { ok: false, used: decision.used, limit: decision.limit };
-	let released = false;
+	const id = decision.id ?? "";
+	let settled = false;
 	return {
 		ok: true,
 		owner,
 		bytes,
+		id,
 		release: async () => {
-			if (released || bytes <= 0) return;
-			released = true;
-			await stub.releaseStorage(owner, bytes);
+			if (settled || bytes <= 0 || !id) return;
+			settled = true;
+			await stub.cancelStorage(owner, id);
+		},
+		commit: async () => {
+			if (settled || bytes <= 0 || !id) return;
+			settled = true;
+			await stub.commitStorage(owner, id);
 		},
 	};
+}
+
+/** Record a delete before the row is removed. Complete or abort that id exactly once. */
+export async function beginStorageDelete(env: Env, owner: string, bytes: number): Promise<string | null> {
+	if (bytes <= 0) return null;
+	const opened = await ownerStub(env, owner).openStorageDelete(owner, bytes);
+	return opened.id || null;
+}
+
+export async function finishStorageDelete(env: Env, owner: string, id: string | null): Promise<void> {
+	if (!id) return;
+	await ownerStub(env, owner).completeStorageDelete(owner, id);
+}
+
+export async function abortStorageDelete(env: Env, owner: string, id: string | null): Promise<void> {
+	if (!id) return;
+	await ownerStub(env, owner).abortStorageDelete(owner, id);
 }
 
 export async function holdMailboxBytes(
@@ -57,15 +88,17 @@ export async function holdMailboxBytes(
 	return holdStorage(env, owner, bytes, session?.plan);
 }
 
-export async function reclaimStorage(env: Env, owner: string, bytes: number): Promise<void> {
-	if (bytes <= 0) return;
-	await ownerStub(env, owner).releaseStorage(owner, bytes);
-}
-
-/** Keep the charge and the object keys when R2 cleanup cannot be confirmed. */
-export async function rememberOrphans(env: Env, owner: string, keys: string[], bytes: number): Promise<void> {
+/** Keep the charge and the object keys when R2 cleanup cannot be confirmed.
+ * `holdId` is retired with the record so a later cancel cannot credit those bytes too. */
+export async function rememberOrphans(
+	env: Env,
+	owner: string,
+	keys: string[],
+	bytes: number,
+	holdId?: string,
+): Promise<void> {
 	if (keys.length === 0 || bytes <= 0) return;
-	await ownerStub(env, owner).retainOrphans(keys, bytes);
+	await ownerStub(env, owner).retainOrphans(keys, bytes, holdId);
 }
 
 export function storageQuotaResponse(decision: Extract<StorageHold, { ok: false }> | StorageAdmission): Response {

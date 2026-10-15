@@ -132,6 +132,7 @@ export async function handleReplyEmail(c: AppContext) {
 		}),
 	);
 
+	await held.commit();
 	return c.json({ id: messageId, status: "sent" }, 202);
 	} catch (e) {
 		let keepCharge = e instanceof AttachmentCleanupError;
@@ -146,7 +147,7 @@ export async function handleReplyEmail(c: AppContext) {
 			}
 		}
 		if (!stored && keepCharge && orphanKeys.length > 0) {
-			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes).catch((err) => {
+			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
 				console.error("orphan record failed:", (err as Error).message);
 			});
 		}
@@ -257,6 +258,7 @@ export async function handleForwardEmail(c: AppContext) {
 		}),
 	);
 
+	await held.commit();
 	return c.json({ id: messageId, status: "sent" }, 202);
 	} catch (e) {
 		let keepCharge = e instanceof AttachmentCleanupError;
@@ -271,7 +273,7 @@ export async function handleForwardEmail(c: AppContext) {
 			}
 		}
 		if (!stored && keepCharge && orphanKeys.length > 0) {
-			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes).catch((err) => {
+			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
 				console.error("orphan record failed:", (err as Error).message);
 			});
 		}

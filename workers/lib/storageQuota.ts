@@ -3,7 +3,7 @@
  * Dates, message ids, and ordinary sender addresses are billed once they exceed
  * the fixed size of the value this process generates. */
 
-export const STORAGE_QUOTA_FREE_BYTES = 10 * 1024 * 1024 * 1024;
+export const STORAGE_QUOTA_FREE_BYTES = 2 * 1024 * 1024 * 1024;
 export const STORAGE_QUOTA_PRO_BYTES = 20 * 1024 * 1024 * 1024;
 
 /** `uuid@domain` message ids fit under this. Longer ones are caller content. */
@@ -156,7 +156,7 @@ type StorageTx = {
 	put(key: string, value: unknown): Promise<void>;
 };
 
-export type StorageAdmission = { ok: boolean; used: number; limit: number };
+export type StorageAdmission = { ok: boolean; used: number; limit: number; id?: string };
 
 /**
  * Add `bytes` only when the result stays within `limit`. The caller seeds

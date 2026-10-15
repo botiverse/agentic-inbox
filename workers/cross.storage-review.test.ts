@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { app } from "./index";
-import { reserveStoredBytes, releaseStoredBytes } from "./lib/storageQuota";
+
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { resolve } from "node:path";
@@ -19,9 +19,10 @@ it("existing usage cannot be credited twice when the first quota operation is a 
     const mailbox=env.MAILBOX.get(env.MAILBOX.idFromName("box@mail.build"));
     await account.reserve(owner,"box@mail.build","box",10);
     await mailbox.setUsage(100);
-    // HTTP DELETE removes the mail before calling reclaimStorage/releaseStorage.
+    // Baseline and the delete id exist before the row is removed.
+    const op=await account.openStorageDelete(owner,20);
     await mailbox.setUsage(80);
-    const released=await account.releaseStorage(owner,20);
+    const released=await account.completeStorageDelete(owner,op.id);
     return Response.json({counter:released.used, actual:await mailbox.usageBytes()});
   }};`,resolveDir:resolve('.'),loader:'ts'},bundle:true,write:false,format:'esm',platform:'browser',external:['cloudflare:workers']});
  const mf=new Miniflare(convertV4MiniflareOptions({name:'review-delete',modules:true,script:result.outputFiles[0].text,compatibilityDate:'2025-11-28',durableObjects:{OWNER:{className:'OwnerDO',useSQLite:true},MAILBOX:{className:'UsageMailbox',useSQLite:true}}}));
@@ -47,14 +48,25 @@ it("adding an already-populated mailbox after the account was seeded cannot bypa
 },30000);
 
 function ledger(initial:number) {
- let used=initial;let tail=Promise.resolve();
- const store={transaction<T>(f:(tx:{get:(key:string)=>Promise<unknown>;put:(key:string,v:unknown)=>Promise<void>})=>Promise<T>){
-  const run=tail.then(()=>f({get:async()=>used,put:async(_k,v)=>{used=Number(v);}}));tail=run.then(()=>undefined,()=>undefined);return run;
- }};
- return {get used(){return used;}, binding:{idFromName:(s:string)=>s,get:()=>({
+ let committed=initial; const holds=new Map<string,number>(); const deletes=new Map<string,number>(); let seq=0;
+ const occupied=()=>{let pending=0; for (const n of deletes.values()) pending+=n; return Math.max(0,committed-pending);};
+ return {get used(){return occupied();}, binding:{idFromName:(s:string)=>s,get:()=>({
   plan:async()=>"free",rememberPlan:async()=>{},
-  reserveStorage:async(_o:string,bytes:number)=>reserveStoredBytes(store,bytes,350),
-  releaseStorage:async(_o:string,bytes:number)=>releaseStoredBytes(store,bytes),
+  reserveStorage:async(_o:string,bytes:number)=>{
+   const add=Math.max(0,Math.floor(bytes)); const visible=occupied();
+   if(add>0&&visible+add>350) return {ok:false,used:visible,limit:350};
+   const id=`h${++seq}`; if(add>0){holds.set(id,add); committed+=add;}
+   return {ok:true,used:occupied(),limit:350,id:add>0?id:undefined};
+  },
+  cancelStorage:async(_o:string,id:string)=>{const n=holds.get(id)??0; if(holds.delete(id)) committed=Math.max(0,committed-n); return {used:occupied()};},
+  commitStorage:async(_o:string,id:string)=>{holds.delete(id); return {used:occupied()};},
+  openStorageDelete:async(_o:string,bytes:number)=>{const n=Math.max(0,Math.floor(bytes)); const id=n>0?`d${++seq}`:""; if(n>0) deletes.set(id,n); return {id,used:occupied()};},
+  completeStorageDelete:async(_o:string,id:string)=>{const n=deletes.get(id)??0; if(deletes.delete(id)) committed=Math.max(0,committed-n); return {used:occupied()};},
+  abortStorageDelete:async(_o:string,id:string)=>{deletes.delete(id); return {used:occupied()};},
+  retainOrphans:async(_keys:string[],bytes:number,holdId?:string)=>{
+   if(holdId){const n=holds.get(holdId)??0; if(holds.delete(holdId)) committed=Math.max(0,committed-n); committed+=bytes;}
+   else committed=Math.max(0,committed-bytes);
+  },
  })}};
 }
 

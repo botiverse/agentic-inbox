@@ -16,7 +16,8 @@ it("real OwnerDO caps concurrent storage reservations and keeps the counter acro
 					const bytes = Number(url.searchParams.get("bytes") ?? "0");
 					const limit = Number(url.searchParams.get("limit") ?? "10");
 					const stub = env.OWNER.get(env.OWNER.idFromName(owner));
-					if (url.searchParams.get("release") === "1") return Response.json(await stub.releaseStorage(owner, bytes));
+					const cancel = url.searchParams.get("cancel");
+					if (cancel) return Response.json(await stub.cancelStorage(owner, cancel));
 					return Response.json(await stub.reserveStorage(owner, bytes, limit));
 				}};`,
 			resolveDir: resolve("."),
@@ -43,14 +44,18 @@ it("real OwnerDO caps concurrent storage reservations and keeps the counter acro
 	let runtime = new Miniflare(options);
 	try {
 		const results = await Promise.all(Array.from({ length: 20 }, async () =>
-			(await runtime.dispatchFetch("https://test/account-one?bytes=1&limit=10")).json() as Promise<{ ok: boolean; used: number }>));
+			(await runtime.dispatchFetch("https://test/account-one?bytes=1&limit=10")).json() as Promise<{ ok: boolean; used: number; id?: string }>));
 		expect(results.filter((row) => row.ok)).toHaveLength(10);
 		expect(results.every((row) => row.used <= 10)).toBe(true);
 		expect(await (await runtime.dispatchFetch("https://test/account-two?bytes=10&limit=10")).json()).toMatchObject({ ok: true, used: 10 });
 		await runtime.dispose();
 		runtime = new Miniflare(options);
 		expect(await (await runtime.dispatchFetch("https://test/account-one?bytes=1&limit=10")).json()).toMatchObject({ ok: false, used: 10 });
-		expect(await (await runtime.dispatchFetch("https://test/account-one?bytes=4&release=1")).json()).toMatchObject({ used: 6 });
+		let used = 10;
+		for (const row of results.filter((row) => row.ok).slice(0, 4)) {
+			used = (await (await runtime.dispatchFetch(`https://test/account-one?cancel=${row.id}`)).json() as { used: number }).used;
+		}
+		expect(used).toBe(6);
 		expect(await (await runtime.dispatchFetch("https://test/account-one?bytes=4&limit=10")).json()).toMatchObject({ ok: true, used: 10 });
 	} finally {
 		await runtime.dispose();

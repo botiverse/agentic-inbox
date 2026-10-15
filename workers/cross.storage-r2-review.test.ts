@@ -3,7 +3,7 @@ import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { resolve } from 'node:path';
 import { app } from './index';
-import { reserveStoredBytes, releaseStoredBytes } from './lib/storageQuota';
+
 
 async function withOwner(body: string, verify: (value: any) => void) {
  const result = await build({stdin:{contents:`
@@ -26,9 +26,11 @@ async function withOwner(body: string, verify: (value: any) => void) {
 it('two concurrent first deletes cannot both be reflected in the seed and then deducted again',async()=>{
  await withOwner(`
    await account.reserve(owner,'box@mail.build','box',10);
-   // Two messages of ten bytes have just been deleted; both releases enter before seeding.
-   await box.setUsage(80,true);
-   await Promise.all([account.releaseStorage(owner,10),account.releaseStorage(owner,10)]);
+   await box.setUsage(100);
+   const a=await account.openStorageDelete(owner,10);
+   const b=await account.openStorageDelete(owner,10);
+   await box.setUsage(80);
+   await Promise.all([account.completeStorageDelete(owner,a.id),account.completeStorageDelete(owner,b.id)]);
    return Response.json({counter:(await account.reserveStorage(owner,0,100)).used,actual:await box.usageBytes()});
  `,value=>expect(value).toEqual({counter:80,actual:80}));
 },30000);
@@ -45,11 +47,17 @@ it('releasing a mailbox slot cannot free the storage budget while its data is re
 },30000);
 
 function ledger() {
- let used=0;let tail=Promise.resolve();
- const storage={transaction<T>(fn:(tx:{get:(k:string)=>Promise<unknown>;put:(k:string,v:unknown)=>Promise<void>})=>Promise<T>){
-  const result=tail.then(()=>fn({get:async()=>used,put:async(_k,v)=>{used=Number(v);}}));tail=result.then(()=>undefined,()=>undefined);return result;
- }};
- return {get used(){return used;},binding:{idFromName:(s:string)=>s,get:()=>({plan:async()=>'free',rememberPlan:async()=>{},reserveStorage:async(_o:string,n:number)=>reserveStoredBytes(storage,n,350),releaseStorage:async(_o:string,n:number)=>releaseStoredBytes(storage,n)})}};
+ let committed=0; const holds=new Map<string,number>(); const deletes=new Map<string,number>(); let seq=0;
+ const occupied=()=>{let pending=0; for (const n of deletes.values()) pending+=n; return Math.max(0,committed-pending);};
+ return {get used(){return occupied();},binding:{idFromName:(s:string)=>s,get:()=>({plan:async()=>'free',rememberPlan:async()=>{},
+  reserveStorage:async(_o:string,bytes:number)=>{const add=Math.max(0,Math.floor(bytes)); const visible=occupied(); if(add>0&&visible+add>350) return {ok:false,used:visible,limit:350}; const id=`h${++seq}`; if(add>0){holds.set(id,add); committed+=add;} return {ok:true,used:occupied(),limit:350,id};},
+  cancelStorage:async(_o:string,id:string)=>{const n=holds.get(id)??0; if(holds.delete(id)) committed=Math.max(0,committed-n); return {used:occupied()};},
+  commitStorage:async(_o:string,id:string)=>{holds.delete(id); return {used:occupied()};},
+  openStorageDelete:async()=>({id:'',used:occupied()}),
+  completeStorageDelete:async(_o:string,id:string)=>({used:occupied()}),
+  abortStorageDelete:async()=>({used:occupied()}),
+  retainOrphans:async(_k:string[],bytes:number,holdId?:string)=>{if(holdId) holds.delete(holdId); committed=Math.max(0,committed-bytes);},
+ })}};
 }
 
 it('an R2 put that commits then throws must not leave an uncharged object',async()=>{

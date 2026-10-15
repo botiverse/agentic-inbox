@@ -5,7 +5,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./types";
 import { mailboxStub } from "./lib/mailboxRef";
-import { reserveStoredBytes, type StorageAdmission } from "./lib/storageQuota";
+import type { StorageAdmission } from "./lib/storageQuota";
 
 /**
  * Per-owner mailbox registry. Addressed by `idFromName(owner)`, so one instance
@@ -52,7 +52,9 @@ export class OwnerDO extends DurableObject<Env> {
 	/** Atomically reserve a slot for `email`. Idempotent if already owned.
 	 * Returns `{ ok:false }` (without adding) when the plan limit is reached.
 	 * Once storage is seeded, a mailbox adopted with mail already in it adds
-	 * those bytes. Before the seed, the scan picks the mailbox up from the map. */
+	 * those bytes. An address released while its mail remains is already in
+	 * the baseline or the retained map, so claiming it again does not add twice.
+	 * Before the seed, the scan picks the mailbox up from the map. */
 	async reserve(
 		owner: string,
 		email: string,
@@ -70,7 +72,15 @@ export class OwnerDO extends DurableObject<Env> {
 			await tx.put("mailboxes", map);
 			if (await tx.get("storage:seeded")) {
 				const baseline = (await tx.get<Record<string, number>>("storage:baseline")) ?? {};
-				if (!(email in baseline)) {
+				const retained = (await tx.get<Record<string, number>>(RETAINED_KEY)) ?? {};
+				if (email in baseline || email in retained) {
+					if (!(email in baseline)) baseline[email] = retained[email] ?? incoming;
+					if (email in retained) {
+						delete retained[email];
+						await tx.put(RETAINED_KEY, retained);
+					}
+					await tx.put("storage:baseline", baseline);
+				} else {
 					const used = Number((await tx.get<number>("storage:used")) ?? 0);
 					await tx.put("storage:used", used + incoming);
 					baseline[email] = incoming;
@@ -81,18 +91,26 @@ export class OwnerDO extends DurableObject<Env> {
 		});
 	}
 
-	/** Release a slot (e.g. mailbox deleted). Idempotent.
-	 * Mail and attachments stay in the mailbox Durable Object, so the byte
-	 * counter and the per-mailbox baseline stay too. Re-claiming the same
-	 * address does not add those bytes again. A different address still pays
-	 * for whatever is already stored in it. */
+	/** Release a slot. Mail and attachments stay in the mailbox Durable Object.
+	 * Seed the byte baseline while this address is still in the registry, then
+	 * keep a retained record so a later init still counts those bytes. The
+	 * counter is not reduced. Re-claiming the same address does not add them
+	 * again. A different address still pays for whatever is already stored. */
 	async release(owner: string, email: string): Promise<{ owned: number }> {
 		await this.ensureSeed(owner);
+		await this.ensureUsage(owner);
+		const live = await this.mailboxUsage(email);
 		return this.ctx.storage.transaction(async (tx) => {
 			const map = (await tx.get<Record<string, string>>("mailboxes")) ?? {};
 			if (!(email in map)) return { owned: Object.keys(map).length };
+			const baseline = (await tx.get<Record<string, number>>("storage:baseline")) ?? {};
+			const retained = (await tx.get<Record<string, number>>(RETAINED_KEY)) ?? {};
+			retained[email] = live;
+			if (!(email in baseline)) baseline[email] = live;
 			delete map[email];
 			await tx.put("mailboxes", map);
+			await tx.put("storage:baseline", baseline);
+			await tx.put(RETAINED_KEY, retained);
 			return { owned: Object.keys(map).length };
 		});
 	}
@@ -150,6 +168,13 @@ export class OwnerDO extends DurableObject<Env> {
 				baseline[email] = bytes;
 				total += bytes;
 			}
+			const retained = (await this.ctx.storage.get<Record<string, number>>(RETAINED_KEY)) ?? {};
+			for (const [email, bytes] of Object.entries(retained)) {
+				if (!(email in baseline)) {
+					baseline[email] = bytes;
+					total += bytes;
+				}
+			}
 			let outcome: "wrote" | "joined" | "stale" = "stale";
 			await this.ctx.storage.transaction(async (tx) => {
 				// Transactions can retry. Drop a verdict from a rolled-back attempt.
@@ -160,6 +185,13 @@ export class OwnerDO extends DurableObject<Env> {
 				}
 				const current = (await tx.get<Record<string, string>>("mailboxes")) ?? map;
 				for (const email of this.addressesFor(owner, current)) {
+					if (!(email in baseline)) {
+						outcome = "stale";
+						return;
+					}
+				}
+				const retainedNow = (await tx.get<Record<string, number>>(RETAINED_KEY)) ?? {};
+				for (const email of Object.keys(retainedNow)) {
 					if (!(email in baseline)) {
 						outcome = "stale";
 						return;
@@ -176,47 +208,127 @@ export class OwnerDO extends DurableObject<Env> {
 		throw new Error("storage seed did not converge");
 	}
 
-	/** Reserve `bytes` against the account cap. Does not delete existing mail. */
+	/** Counter minus open deletion credits. Holds are already inside the counter. */
+	private async reported(tx: StorageTx): Promise<number> {
+		const used = Number((await tx.get<number>("storage:used")) ?? 0);
+		const deletes = (await tx.get<Record<string, number>>(DELETES_KEY)) ?? {};
+		return Math.max(0, used - sumValues(deletes));
+	}
+
+	/** Reserve `bytes` for one write. The returned id is the only handle that can cancel it. */
 	async reserveStorage(owner: string, bytes: number, limit: number): Promise<StorageAdmission> {
 		await this.sweepOrphans();
 		await this.ensureUsage(owner);
-		return reserveStoredBytes(this.ctx.storage, bytes, limit);
-	}
-
-	/** Bytes currently stored across this owner's mailboxes. Throws if a read fails. */
-	private async measuredUsage(owner: string): Promise<number> {
-		const map = (await this.ctx.storage.get<Record<string, string>>("mailboxes")) ?? {};
-		let total = 0;
-		for (const email of this.addressesFor(owner, map)) total += await this.mailboxUsage(email);
-		return total;
-	}
-
-	/**
-	 * Return bytes after a delete or a cancelled hold.
-	 * The counter may fall only as far as the bytes still stored. A refund that
-	 * arrives after a seed already taken from the post-delete mailbox therefore
-	 * subtracts nothing. A later delete, whose bytes the counter still includes,
-	 * subtracts once, down to the new measured total.
-	 */
-	async releaseStorage(owner: string, bytes: number): Promise<{ used: number }> {
-		await this.sweepOrphans();
-		await this.ensureUsage(owner);
-		const actual = await this.measuredUsage(owner);
-		const requested = Math.max(0, Math.floor(bytes));
+		const add = Math.max(0, Math.floor(bytes));
+		const id = crypto.randomUUID();
 		return this.ctx.storage.transaction(async (tx) => {
-			const used = Number((await tx.get<number>("storage:used")) ?? 0);
-			const excess = Math.max(0, used - actual);
-			const next = used - Math.min(requested, excess);
-			if (next !== used) await tx.put("storage:used", next);
-			return { used: next };
+			const visible = await this.reported(tx);
+			if (add > 0 && visible + add > limit) return { ok: false, used: visible, limit };
+			if (add > 0) {
+				const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
+				holds[id] = add;
+				await tx.put(HOLDS_KEY, holds);
+				const used = Number((await tx.get<number>("storage:used")) ?? 0);
+				await tx.put("storage:used", used + add);
+			}
+			return { ok: true, used: await this.reported(tx), limit, id: add > 0 ? id : undefined };
 		});
 	}
 
-	/** Remember object keys whose bytes stayed charged because delete was not confirmed. */
-	async retainOrphans(keys: string[], bytes: number): Promise<void> {
+	/** Drop one uncommitted reservation. A missing id has already been cancelled or committed. */
+	async cancelStorage(owner: string, id: string): Promise<{ used: number }> {
+		if (!id) return { used: await this.reported(this.ctx.storage) };
+		await this.sweepOrphans();
+		await this.ensureUsage(owner);
+		return this.ctx.storage.transaction(async (tx) => {
+			const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
+			if (id in holds) {
+				const credit = Math.max(0, Math.floor(holds[id] ?? 0));
+				delete holds[id];
+				await tx.put(HOLDS_KEY, holds);
+				const used = Number((await tx.get<number>("storage:used")) ?? 0);
+				const next = Math.max(0, used - credit);
+				if (next !== used) await tx.put("storage:used", next);
+			}
+			return { used: await this.reported(tx) };
+		});
+	}
+
+	/** The write landed. The id can no longer be cancelled; the bytes stay on the counter. */
+	async commitStorage(owner: string, id: string): Promise<{ used: number }> {
+		if (!id) return { used: await this.reported(this.ctx.storage) };
+		await this.sweepOrphans();
+		await this.ensureUsage(owner);
+		return this.ctx.storage.transaction(async (tx) => {
+			const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
+			if (id in holds) {
+				delete holds[id];
+				await tx.put(HOLDS_KEY, holds);
+			}
+			return { used: await this.reported(tx) };
+		});
+	}
+
+	/** Name the bytes a delete will return. Call this before the row or objects are removed. */
+	async openStorageDelete(owner: string, bytes: number): Promise<{ id: string; used: number }> {
+		await this.sweepOrphans();
+		await this.ensureUsage(owner);
+		const credit = Math.max(0, Math.floor(bytes));
+		if (credit <= 0) return { id: "", used: await this.reported(this.ctx.storage) };
+		const id = crypto.randomUUID();
+		return this.ctx.storage.transaction(async (tx) => {
+			const deletes = (await tx.get<Record<string, number>>(DELETES_KEY)) ?? {};
+			deletes[id] = credit;
+			await tx.put(DELETES_KEY, deletes);
+			return { id, used: await this.reported(tx) };
+		});
+	}
+
+	/** Credit one prepared delete. A second call finds the id gone and subtracts nothing. */
+	async completeStorageDelete(owner: string, id: string): Promise<{ used: number }> {
+		if (!id) return { used: await this.reported(this.ctx.storage) };
+		await this.sweepOrphans();
+		await this.ensureUsage(owner);
+		return this.ctx.storage.transaction(async (tx) => {
+			const deletes = (await tx.get<Record<string, number>>(DELETES_KEY)) ?? {};
+			if (id in deletes) {
+				const credit = Math.max(0, Math.floor(deletes[id] ?? 0));
+				delete deletes[id];
+				await tx.put(DELETES_KEY, deletes);
+				const used = Number((await tx.get<number>("storage:used")) ?? 0);
+				const next = Math.max(0, used - credit);
+				if (next !== used) await tx.put("storage:used", next);
+			}
+			return { used: await this.reported(tx) };
+		});
+	}
+
+	/** The delete did not happen. Drop its credit without touching the counter. */
+	async abortStorageDelete(owner: string, id: string): Promise<{ used: number }> {
+		if (!id) return { used: await this.reported(this.ctx.storage) };
+		return this.ctx.storage.transaction(async (tx) => {
+			const deletes = (await tx.get<Record<string, number>>(DELETES_KEY)) ?? {};
+			if (id in deletes) {
+				delete deletes[id];
+				await tx.put(DELETES_KEY, deletes);
+			}
+			return { used: await this.reported(tx) };
+		});
+	}
+
+	/** Remember object keys whose bytes stayed charged because delete was not confirmed.
+	 * `holdId`, when set, is retired here so only this orphan record can credit those bytes. */
+	async retainOrphans(keys: string[], bytes: number, holdId?: string): Promise<void> {
 		if (keys.length === 0 || bytes <= 0) return;
 		const record = { id: crypto.randomUUID(), keys, bytes: Math.floor(bytes) };
 		await this.ctx.storage.transaction(async (tx) => {
+			if (holdId) {
+				const holds = (await tx.get<Record<string, number>>(HOLDS_KEY)) ?? {};
+				if (holdId in holds) {
+					delete holds[holdId];
+					await tx.put(HOLDS_KEY, holds);
+				}
+			}
 			const pending = (await tx.get<OrphanRecord[]>("storage:orphans")) ?? [];
 			pending.push(record);
 			await tx.put("storage:orphans", pending);
@@ -257,4 +369,19 @@ export class OwnerDO extends DurableObject<Env> {
 	}
 }
 
+const HOLDS_KEY = "storage:holds";
+const DELETES_KEY = "storage:deletes";
+const RETAINED_KEY = "storage:retained";
+
+type StorageTx = {
+	get<T = unknown>(key: string): Promise<T | undefined>;
+	put<T>(key: string, value: T): Promise<void>;
+};
+
 type OrphanRecord = { id?: string; keys: string[]; bytes: number };
+
+function sumValues(map: Record<string, number>): number {
+	let total = 0;
+	for (const value of Object.values(map)) total += Number(value) || 0;
+	return total;
+}

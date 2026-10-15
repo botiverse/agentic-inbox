@@ -3,7 +3,7 @@ import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { resolve } from 'node:path';
 import { app } from './index';
-import { reserveStoredBytes, releaseStoredBytes } from './lib/storageQuota';
+
 
 async function withOwner(body:string, verify:(result:any)=>void){
  const result=await build({stdin:{contents:`
@@ -26,11 +26,11 @@ it('another write seeding between physical deletion and its refund cannot double
  await withOwner(`
   await account.reserve(owner,'box@mail.build','box',10);
   await box.setUsage(100);
-  // Deletion finished in MailboxDO; its refund is delayed behind another request.
+  const op=await account.openStorageDelete(owner,20);
   await box.setUsage(80);
   await account.reserveStorage(owner,1,100);
   await box.setUsage(81);
-  await account.releaseStorage(owner,20);
+  await account.completeStorageDelete(owner,op.id);
   return Response.json({counter:(await account.reserveStorage(owner,0,100)).used,actual:await box.usageBytes()});
  `,r=>expect(r).toEqual({counter:81,actual:81}));
 },30000);
@@ -46,10 +46,14 @@ it('two concurrent orphan sweeps refund one cleanup record only once',async()=>{
 },30000);
 
 it('caller-supplied short thread IDs cannot be stored indefinitely with a zero charge',async()=>{
- let used=0;const stored:string[]=[];let tail=Promise.resolve();
- const storage={transaction<T>(fn:(tx:{get:(k:string)=>Promise<unknown>;put:(k:string,v:unknown)=>Promise<void>})=>Promise<T>){const run=tail.then(()=>fn({get:async()=>used,put:async(_k,v)=>{used=Number(v);}}));tail=run.then(()=>undefined,()=>undefined);return run;}};
+ let used=0;const stored:string[]=[]; const holds=new Map<string,number>(); let seq=0;
  const env={BUCKET:{get:async()=>({json:async()=>({owner:'account'})})},
-  OWNER:{idFromName:(s:string)=>s,get:()=>({plan:async()=>'free',rememberPlan:async()=>{},reserveStorage:async(_o:string,n:number)=>reserveStoredBytes(storage,n,350),releaseStorage:async(_o:string,n:number)=>releaseStoredBytes(storage,n)})},
+  OWNER:{idFromName:(s:string)=>s,get:()=>({plan:async()=>'free',rememberPlan:async()=>{},
+   reserveStorage:async(_o:string,n:number)=>{const add=Math.max(0,Math.floor(n)); if(add>0&&used+add>350) return {ok:false,used,limit:350}; const id=`h${++seq}`; if(add>0){holds.set(id,add); used+=add;} return {ok:true,used,limit:350,id};},
+   cancelStorage:async(_o:string,id:string)=>{const n=holds.get(id)??0; if(holds.delete(id)) used=Math.max(0,used-n); return {used};},
+   commitStorage:async(_o:string,id:string)=>{holds.delete(id); return {used};},
+   openStorageDelete:async()=>({id:'',used}), completeStorageDelete:async()=>({used}), abortStorageDelete:async()=>({used}),
+  })},
   MAILBOX:{idFromName:(s:string)=>s,get:()=>({createEmail:async(_f:string,row:{thread_id:string})=>{stored.push(row.thread_id);return{created:true,id:'id'};}})}};
  for(let i=0;i<20;i++)await app.request('/api/v1/mailboxes/box@mail.build/drafts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:'',subject:'',to:'',thread_id:`00000000-0000-4000-8000-${String(i).padStart(12,'0')}`})},env as never);
  expect({charged:used,storedBytes:stored.reduce((n,s)=>n+s.length,0)}).toSatisfy((r:{charged:number;storedBytes:number})=>r.charged>=r.storedBytes && r.storedBytes<=350);

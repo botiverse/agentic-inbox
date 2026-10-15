@@ -30,7 +30,7 @@ import { claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidA
 import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDomains } from "./lib/flags";
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
-import { accountOwner, attachmentRecordBytes, chargeSessionWrite, holdMailboxBytes, reclaimStorage, rememberOrphans, storageQuotaResponse, storedMailBytes, storedRowBytes } from "./lib/accountStorage";
+import { abortStorageDelete, accountOwner, attachmentRecordBytes, beginStorageDelete, chargeSessionWrite, finishStorageDelete, holdMailboxBytes, rememberOrphans, storageQuotaResponse, storedMailBytes, storedRowBytes } from "./lib/accountStorage";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
 import { requireMailbox, type MailboxContext } from "./lib/mailbox";
@@ -112,17 +112,18 @@ async function deliverToInbox(
 	attachments: Parameters<MailboxDO["createEmail"]>[2],
 	opts?: { storageHeld?: boolean },
 ): Promise<{ created: boolean; id: string; quotaExceeded?: boolean; used?: number; limit?: number }> {
-	let release: (() => Promise<void>) | undefined;
+	let hold: { release: () => Promise<void>; commit: () => Promise<void> } | undefined;
 	if (!opts?.storageHeld) {
 		const bytes = storedRowBytes(email, attachments.reduce((sum, att) => sum + attachmentRecordBytes(att), 0));
-		const hold = await holdMailboxBytes(env, mailbox, bytes);
-		if (!hold.ok) return { created: false, id: email.id, quotaExceeded: true, used: hold.used, limit: hold.limit };
-		release = hold.release;
+		const reserved = await holdMailboxBytes(env, mailbox, bytes);
+		if (!reserved.ok) return { created: false, id: email.id, quotaExceeded: true, used: reserved.used, limit: reserved.limit };
+		hold = reserved;
 	}
 	try {
 		const created = await stub.createEmail(Folders.INBOX, email, attachments);
-		if (!created.created) await release?.();
+		if (!created.created) await hold?.release();
 		else {
+			await hold?.commit();
 			scheduleInboxNotify(waitUntil, env, {
 				mailbox,
 				emailId: created.id,
@@ -133,7 +134,7 @@ async function deliverToInbox(
 		}
 		return created;
 	} catch (e) {
-		await release?.();
+		await hold?.release();
 		throw e;
 	}
 }
@@ -503,13 +504,14 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 		}
 		// The row was not stored. A later confirmed object delete refunds the whole hold.
 		if (keepCharge && held.ok && orphanKeys.length > 0) {
-			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes).catch((err) => {
+			await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
 				console.error("orphan record failed:", (err as Error).message);
 			});
 		}
 		if (!keepCharge) await held.release();
 		throw e;
 	}
+	await held.commit();
 
 	c.executionCtx.waitUntil(
 		sendEmail(c.env.EMAIL, {
@@ -629,6 +631,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			await senderHold.release();
 			throw e;
 		}
+		await senderHold.commit();
 		return c.json({ id: created.id, status: "sent", delivery: "internal" }, 202);
 	}
 
@@ -674,6 +677,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 		await senderHold.release();
 		throw e;
 	}
+	await senderHold.commit();
 	return c.json({ id: messageId, status: "sent", delivery: "external", to }, 202);
 });
 
@@ -692,11 +696,14 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	};
 	const nextBytes = storedRowBytes(draftRow);
 	const oldBytes = draft_id ? (await stub.measureEmailBytes(draft_id) ?? 0) : 0;
-	const delta = nextBytes - oldBytes;
-	// Reserve returns, then deleteEmail is the next await. An extra await here
-	// lets a concurrent replacement take the old draft first.
-	const held = delta > 0 ? await chargeSessionWrite(c, mailboxId, delta) : null;
-	if (held && !held.ok) return storageQuotaResponse(held);
+	// Name the old row's bytes before anyone deletes it. The reserve below is the
+	// next await that loses the draft; do not add another await after it returns.
+	const removal = draft_id && oldBytes > 0 ? await beginStorageDelete(c.env, owner, oldBytes) : null;
+	const held = nextBytes > 0 ? await chargeSessionWrite(c, mailboxId, nextBytes) : null;
+	if (held && !held.ok) {
+		await abortStorageDelete(c.env, owner, removal);
+		return storageQuotaResponse(held);
+	}
 	let deleted = false;
 	let stored = false;
 	try {
@@ -705,6 +712,7 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 			if (removed === null) {
 				// The other replacement already took this draft and its old-byte credit.
 				if (held?.ok) await held.release();
+				await abortStorageDelete(c.env, owner, removal);
 				return c.json({ error: "Draft was replaced concurrently", code: "CONFLICT" }, 409);
 			}
 			if (removed.length > 0) {
@@ -716,6 +724,7 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 					await rememberOrphans(c.env, owner, keys, oldBytes).catch((err) => {
 						console.error("orphan record failed:", (err as Error).message);
 					});
+					await abortStorageDelete(c.env, owner, removal);
 					throw new AttachmentCleanupError((cleanupErr as Error).message, keys, oldBytes);
 				}
 			}
@@ -723,15 +732,17 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 		}
 		await stub.createEmail(Folders.DRAFT, draftRow, []);
 		stored = true;
-		if (delta < 0) await reclaimStorage(c.env, owner, -delta);
+		await finishStorageDelete(c.env, owner, removal);
+		if (held?.ok) await held.commit();
 		return c.json({ id: messageId, status: "draft", subject: subject || "", recipient: to || "", date: now }, 201);
 	} catch (e) {
 		// A stored replacement keeps its bytes. Rolling it back here would free
 		// space for a draft that still exists. Only a failed create gives them back.
 		// A failed attachment delete keeps the old charge: the row is gone, but the
-		// objects may still be in R2. The new-draft delta is still released.
+		// objects may still be in R2. The new-draft reservation is still released.
 		const keepOld = e instanceof AttachmentCleanupError;
-		if (!stored && deleted && !keepOld && oldBytes > 0) await reclaimStorage(c.env, owner, oldBytes);
+		if (!stored && deleted && !keepOld) await finishStorageDelete(c.env, owner, removal);
+		else if (!stored) await abortStorageDelete(c.env, owner, removal);
 		if (!stored && held?.ok) await held.release();
 		throw e;
 	}
@@ -773,9 +784,12 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const bytes = await c.var.mailboxStub.measureEmailBytes(id);
 	if (bytes === null) return c.json({ error: "Not found" }, 404);
+	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
+	const deletion = await beginStorageDelete(c.env, owner, bytes);
 	const attachments = await c.var.mailboxStub.deleteEmail(id);
 	if (attachments === null) {
 		// Lost a race with another delete. That request returns the bytes.
+		await abortStorageDelete(c.env, owner, deletion);
 		return c.body(null, 204);
 	}
 	if (attachments.length > 0) {
@@ -783,11 +797,11 @@ app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 			await discardAttachmentObjects(c.env.BUCKET, id, attachments);
 		} catch (e) {
 			console.error("attachment cleanup failed:", (e as Error).message);
+			await abortStorageDelete(c.env, owner, deletion);
 			return c.json({ error: "Attachment cleanup failed. Storage quota was kept.", code: "ATTACHMENT_CLEANUP_FAILED" }, 500);
 		}
 	}
-	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
-	await reclaimStorage(c.env, owner, bytes);
+	await finishStorageDelete(c.env, owner, deletion);
 	return c.body(null, 204);
 });
 
@@ -913,7 +927,7 @@ function rejectInbound(event: InboundEmailMessage, reason: string) {
 /** Delete attempted inbound objects, then refund. An unconfirmed delete keeps the charge and the keys. */
 async function releaseInboundAttachments(
 	env: Env,
-	hold: { owner: string; bytes: number; release: () => Promise<void> },
+	hold: { owner: string; bytes: number; id: string; release: () => Promise<void> },
 	messageId: string,
 	stored: StoredAttachment[],
 ): Promise<void> {
@@ -924,7 +938,7 @@ async function releaseInboundAttachments(
 		console.error("inbound attachment cleanup failed:", (cleanupErr as Error).message);
 		const keys = attachmentObjectKeys(messageId, stored);
 		if (keys.length === 0) return;
-		await rememberOrphans(env, hold.owner, keys, hold.bytes).catch((err) => {
+		await rememberOrphans(env, hold.owner, keys, hold.bytes, hold.id).catch((err) => {
 			console.error("orphan record failed:", (err as Error).message);
 		});
 	}
@@ -1056,6 +1070,7 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 		throw e;
 	}
 	if (!created.created) await releaseInboundAttachments(env, inboundHold, messageId, attachmentData);
+	else await inboundHold.commit();
 	const storedId = created.id;
 
 	// Built-in AI auto-draft is OPT-IN and OFF by default. Firing it on every

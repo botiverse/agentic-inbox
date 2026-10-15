@@ -521,6 +521,7 @@ Based on the email content and thread context above, draft a reply using draft_r
 								},
 								[],
 							);
+							await draftHold.commit();
 						} catch (e) {
 							await draftHold.release();
 							throw e;

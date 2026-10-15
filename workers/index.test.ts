@@ -7,8 +7,13 @@ function admittingOwner() {
 		get: () => ({
 			plan: async () => "free",
 			rememberPlan: async () => {},
-			reserveStorage: async () => ({ ok: true, used: 0, limit: 10 }),
-			releaseStorage: async () => ({ used: 0 }),
+			reserveStorage: async () => ({ ok: true, used: 0, limit: 10, id: "hold" }),
+			cancelStorage: async () => ({ used: 0 }),
+			commitStorage: async () => ({ used: 0 }),
+			openStorageDelete: async () => ({ id: "del", used: 0 }),
+			completeStorageDelete: async () => ({ used: 0 }),
+			abortStorageDelete: async () => ({ used: 0 }),
+			retainOrphans: async () => {},
 		}),
 	};
 }

@@ -9,6 +9,7 @@ function rawEmail(to: string) {
 
 function owner(opts: { ok: boolean; used?: number; limit?: number }) {
 	const released: number[] = [];
+	let pending = 0;
 	return {
 		released,
 		binding: {
@@ -16,9 +17,20 @@ function owner(opts: { ok: boolean; used?: number; limit?: number }) {
 			get: () => ({
 				plan: async () => "free" as const,
 				rememberPlan: async () => {},
-				reserveStorage: async () => ({ ok: opts.ok, used: opts.used ?? 0, limit: opts.limit ?? 10 }),
-				releaseStorage: async (_owner: string, bytes: number) => {
-					released.push(bytes);
+				reserveStorage: async () => ({ ok: opts.ok, used: opts.used ?? 0, limit: opts.limit ?? 10, id: "hold" }),
+				cancelStorage: async () => ({ used: 0 }),
+				commitStorage: async () => ({ used: 0 }),
+				openStorageDelete: async (_owner: string, bytes: number) => {
+					pending = bytes;
+					return { id: bytes > 0 ? "del" : "", used: 0 };
+				},
+				completeStorageDelete: async () => {
+					if (pending > 0) released.push(pending);
+					pending = 0;
+					return { used: 0 };
+				},
+				abortStorageDelete: async () => {
+					pending = 0;
 					return { used: 0 };
 				},
 			}),
