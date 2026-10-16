@@ -21,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router";
 import { Folders } from "shared/folders";
 import { formatListDate } from "shared/dates";
+import ExternalSenderMark from "~/components/ExternalSenderMark";
 import MailboxSplitView from "~/components/MailboxSplitView";
 import { getSnippetText } from "~/lib/utils";
 import {
@@ -367,6 +368,7 @@ export default function EmailListRoute() {
 												>
 													{formatParticipants(email)}
 												</span>
+												<ExternalSenderMark external={email.external_sender} />
 												{(email.thread_count ?? 1) > 1 && (
 													<span className="shrink-0 text-xs text-kumo-subtle bg-kumo-fill rounded-full px-1.5 py-0.5 font-medium">
 														{email.thread_count}

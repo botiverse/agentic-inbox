@@ -12,6 +12,7 @@ import {
 	TrashIcon,
 } from "@phosphor-icons/react";
 import EmailAttachmentList from "~/components/EmailAttachmentList";
+import ExternalSenderMark from "~/components/ExternalSenderMark";
 import EmailIframe from "~/components/EmailIframe";
 import {
 	avatarInitial,
@@ -85,9 +86,12 @@ export default function ThreadMessage({
 				>
 					<Avatar isDraft={isDraft} isSelf={isSelf} sender={from} />
 					<div className="flex-1 min-w-0">
-						<div className="flex items-center justify-between">
-							<span className="text-sm font-medium text-kumo-default truncate">
-								{senderLabel}
+						<div className="flex items-center justify-between gap-2">
+							<span className="flex items-center gap-2 min-w-0">
+								<span className="text-sm font-medium text-kumo-default truncate">
+									{senderLabel}
+								</span>
+								<ExternalSenderMark external={email.external_sender} />
 							</span>
 							<span className="text-xs text-kumo-subtle shrink-0">
 								{formatDetailDate(email.date)}
@@ -123,6 +127,7 @@ export default function ThreadMessage({
 								<span className="text-sm font-medium text-kumo-default truncate">
 									{senderLabel}
 								</span>
+								<ExternalSenderMark external={email.external_sender} />
 								{isDraft && <Badge variant="outline">Draft</Badge>}
 							</div>
 							<div className="text-xs text-kumo-subtle">To: {to}</div>
