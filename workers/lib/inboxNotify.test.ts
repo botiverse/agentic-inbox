@@ -16,6 +16,7 @@ import {
 	fromOnAllowList,
 	parseAllowList,
 	sameServerOwners,
+	isExternalSender,
 	type InboxNotifyRouting,
 } from "./inboxNotify";
 
@@ -150,6 +151,19 @@ describe("same-server + allowlist sender gate", () => {
 		expect(sameServerOwners("raft:s1:agent:abc", "raft:s1:human:artin")).toBe(true);
 		expect(sameServerOwners("raft:s1:agent:abc", "raft:s2:agent:abc")).toBe(false);
 		expect(sameServerOwners("raft:s1:agent:abc", null)).toBe(false);
+		expect(isExternalSender("raft:s1:agent:abc", "raft:s1:human:artin")).toBe(false);
+		expect(isExternalSender("raft:s1:agent:abc", "raft:s2:agent:abc")).toBe(true);
+		expect(isExternalSender("raft:s1:agent:abc", null)).toBe(true);
+		expect(isExternalSender(null, "raft:s1:human:artin")).toBe(true);
+		expect(isExternalSender("local:admin", "raft:s1:human:artin")).toBe(true);
+	});
+	it("keeps an allow-listed sender external even when the wake fires", () => {
+		const owner = "raft:s1:agent:agent-uuid";
+		expect(decideNotify({
+			owner, routing, from: "alerts@pager.test", allowList: ["pager.test"],
+		})).toEqual({ action: "notify", routing });
+		expect(isExternalSender(owner, null)).toBe(true);
+		expect(isExternalSender(owner, "raft:other:agent:x")).toBe(true);
 	});
 	it("matches full addresses and domains on the extra allowlist", () => {
 		expect(parseAllowList([" Gmail.com ", "", "@botiverse.dev"])).toEqual(["gmail.com", "@botiverse.dev"]);

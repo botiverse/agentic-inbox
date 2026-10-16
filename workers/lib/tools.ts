@@ -34,6 +34,7 @@ import { AttachmentCleanupError, attachmentObjectKeys, discardAttachmentObjects 
 import { abortStorageDelete, accountOwner, beginStorageDelete, finishStorageDelete, holdMailboxBytes, rememberOrphans, settleCreateHold, storedMailBytes } from "./accountStorage";
 import { storageRowKey } from "./mailboxRef";
 import type { StoredMailFields } from "./storageQuota";
+import { stampExternalSenders } from "./externalSender";
 import type { Env } from "../types";
 
 const STORAGE_QUOTA_ERROR = "Account storage quota exceeded. Delete mail to free space. Existing mail is kept.";
@@ -72,13 +73,14 @@ export async function toolListEmails(
 	params: { folder: string; limit: number; page: number },
 ) {
 	const stub = getMailboxStub(env, mailboxId);
-	return stub.getEmails({
+	const emails = await stub.getEmails({
 		folder: params.folder,
 		limit: params.limit,
 		page: params.page,
 		sortColumn: "date",
 		sortDirection: "DESC",
 	});
+	return stampExternalSenders(env, mailboxId, emails);
 }
 
 // ── get_email ──────────────────────────────────────────────────────
@@ -91,7 +93,8 @@ export async function toolGetEmail(
 	const stub = getMailboxStub(env, mailboxId);
 	const email = await getFullEmail(stub, emailId);
 	if (!email) return { error: "Email not found" };
-	return email;
+	const [stamped] = await stampExternalSenders(env, mailboxId, [email]);
+	return stamped;
 }
 
 // ── get_thread ─────────────────────────────────────────────────────
@@ -102,7 +105,11 @@ export async function toolGetThread(
 	threadId: string,
 ) {
 	const stub = getMailboxStub(env, mailboxId);
-	return getFullThread(stub, threadId);
+	const thread = await getFullThread(stub, threadId);
+	return {
+		...thread,
+		messages: await stampExternalSenders(env, mailboxId, thread.messages),
+	};
 }
 
 // ── search_emails ──────────────────────────────────────────────────
@@ -113,10 +120,12 @@ export async function toolSearchEmails(
 	params: { query: string; folder?: string },
 ) {
 	const stub = getMailboxStub(env, mailboxId);
-	return (stub as unknown as MailboxSearchStub).searchEmails({
+	const emails = await (stub as unknown as MailboxSearchStub).searchEmails({
 		query: params.query,
 		folder: params.folder,
 	});
+	if (!Array.isArray(emails)) return emails;
+	return stampExternalSenders(env, mailboxId, emails as Array<{ sender?: string | null; from?: string | null }>);
 }
 
 // ── draft_reply ────────────────────────────────────────────────────

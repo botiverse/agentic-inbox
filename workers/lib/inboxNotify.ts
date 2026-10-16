@@ -160,6 +160,19 @@ export function sameServerOwners(
 	return !!(a && b && a.serverId === b.serverId);
 }
 
+/**
+ * List / get-email label. True unless both owners are Raft identities on the
+ * same server. The wake allow-list is deliberately not an input: a sender can
+ * still wake the agent and stay marked external. A missing or unparsable
+ * owner is external, so a lookup failure cannot hide an outside sender.
+ */
+export function isExternalSender(
+	mailboxOwner: string | null | undefined,
+	senderOwner: string | null | undefined,
+): boolean {
+	return !sameServerOwners(mailboxOwner, senderOwner);
+}
+
 export function decideNotify(input: {
 	owner: string | null | undefined;
 	/** Explicit false is sticky mute. Undefined/true = notify. */
