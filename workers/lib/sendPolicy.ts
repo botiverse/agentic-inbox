@@ -67,8 +67,10 @@ async function allRecipientsOnSameServer(c: Context<MailboxContext>, recipients:
 
 /**
  * Take the external slot for an authenticated session, after storage admission.
- * A storage refusal must not consume the slot. The slot cannot be returned,
- * so the caller releases its storage hold when this denies the send.
+ * A storage refusal must not consume the slot. The slot cannot be returned:
+ * the caller releases its storage hold when this denies the send, and also
+ * when this throws before any mail is written. A lost admission reply may
+ * already have spent the slot, so that release must not refund it.
  * Same-server To/Cc/Bcc skip the plan and the daily slot.
  */
 export async function reserveAuthenticatedSend(

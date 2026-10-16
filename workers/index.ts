@@ -505,7 +505,13 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 		storageRowKey(mailboxId, messageId),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
-	const sendDenied = await reserveAuthenticatedSend(c, { to, cc, bcc });
+	let sendDenied: Response | undefined;
+	try {
+		sendDenied = await reserveAuthenticatedSend(c, { to, cc, bcc });
+	} catch (err) {
+		await held.release();
+		throw err;
+	}
 	if (sendDenied) {
 		await held.release();
 		return sendDenied;
@@ -649,7 +655,13 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	const sentCopyId = crypto.randomUUID();
 	const senderHold = await chargeSessionWrite(c, from, storedRowBytes(common), undefined, storageRowKey(from, sentCopyId));
 	if (!senderHold.ok) return storageQuotaResponse(senderHold);
-	const sendDenied = await reserveAuthenticatedSend(c, { to });
+	let sendDenied: Response | undefined;
+	try {
+		sendDenied = await reserveAuthenticatedSend(c, { to });
+	} catch (err) {
+		await senderHold.release();
+		throw err;
+	}
 	if (sendDenied) {
 		await senderHold.release();
 		return sendDenied;
