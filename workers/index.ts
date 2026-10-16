@@ -22,6 +22,7 @@ import {
 	withUntrusted,
 } from "./lib/email-helpers";
 import { settingsWithNotify, publicInboxNotify, applySettingsUpdate } from "./lib/inboxNotify";
+import { stampExternalSenders } from "./lib/externalSender";
 import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
 import { runInboundNotify } from "./lib/agentEvents";
 import { SendEmailRequestSchema } from "./lib/schemas";
@@ -419,17 +420,18 @@ app.get("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const sortDirection = c.req.query("sortDirection") as "ASC" | "DESC" | undefined;
 	const stub = c.var.mailboxStub;
 
+	const mailboxId = c.req.param("mailboxId")!;
 	if (threaded && folder) {
 		const emails = await (stub as any).getThreadedEmails({ folder, page, limit });
 		const totalCount = await (stub as any).countThreadedEmails(folder);
-		return c.json({ emails: canonicalRows(emails), totalCount });
+		return c.json({ emails: await stampExternalSenders(c.env, mailboxId, canonicalRows(emails)), totalCount });
 	}
 	const emails = await stub.getEmails({ folder, thread_id, page, limit, sortColumn, sortDirection });
 	if (folder) {
 		const totalCount = await stub.countEmails({ folder, thread_id });
-		return c.json({ emails: canonicalRows(emails), totalCount });
+		return c.json({ emails: await stampExternalSenders(c.env, mailboxId, canonicalRows(emails)), totalCount });
 	}
-	return c.json(canonicalRows(emails));
+	return c.json(await stampExternalSenders(c.env, mailboxId, canonicalRows(emails)));
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
@@ -652,7 +654,10 @@ app.get("/api/v1/mailboxes/:mailboxId/emails/:emailId", async (c: AppContext) =>
 	const withContract: Record<string, unknown> = withUntrusted({ ...lean, ...publicFromTo(e) });
 	if (includes.has("raw_body")) withContract.body = rawBody;
 	if (includes.has("raw_headers")) withContract.raw_headers = rawHeaders;
-	return c.json(withContract);
+	const [stamped] = await stampExternalSenders(c.env, c.req.param("mailboxId")!, [
+		withContract as { from?: string | null; sender?: string | null },
+	]);
+	return c.json(stamped);
 });
 
 app.put("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
@@ -679,7 +684,8 @@ app.post("/api/v1/mailboxes/:mailboxId/emails/:id/move", async (c: AppContext) =
 
 app.get("/api/v1/mailboxes/:mailboxId/threads/:threadId", async (c: AppContext) => {
 	const emails = await (c.var.mailboxStub as any).getThreadEmails(c.req.param("threadId")!);
-	return c.json((emails as Array<{ sender?: string | null; recipient?: string | null; body?: string | null }>).map(toApiEmail));
+	const rows = (emails as Array<{ sender?: string | null; recipient?: string | null; body?: string | null }>).map(toApiEmail);
+	return c.json(await stampExternalSenders(c.env, c.req.param("mailboxId")!, rows));
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/threads/:threadId/read", async (c: AppContext) => {
@@ -727,7 +733,10 @@ app.get("/api/v1/mailboxes/:mailboxId/search", async (c: AppContext) => {
 	const stub = c.var.mailboxStub as any;
 	const emails = await stub.searchEmails({ ...searchOpts, page: intQuery(c, "page"), limit: intQuery(c, "limit") });
 	const totalCount = await stub.countSearchResults(searchOpts);
-	return c.json({ emails: canonicalRows(emails), totalCount });
+	return c.json({
+		emails: await stampExternalSenders(c.env, c.req.param("mailboxId")!, canonicalRows(emails)),
+		totalCount,
+	});
 });
 
 // -- Attachments ----------------------------------------------------

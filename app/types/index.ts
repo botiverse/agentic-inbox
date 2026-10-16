@@ -64,6 +64,8 @@ export interface Email {
 	participants?: string;
 	needs_reply?: boolean;
 	has_draft?: boolean;
+	/** True when From is not a mailbox on this mailbox's Raft server. The API sets it; do not infer it. */
+	external_sender?: boolean;
 }
 
 export interface Attachment {
