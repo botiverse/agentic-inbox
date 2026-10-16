@@ -56,7 +56,7 @@ export async function handleReplyEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
-	const sendDenied = await reserveAccountSend(c);
+	const sendDenied = await reserveAccountSend(c, { to, cc, bcc });
 	if (sendDenied) return sendDenied;
 
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
@@ -150,7 +150,7 @@ export async function handleForwardEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
-	const sendDenied = await reserveAccountSend(c);
+	const sendDenied = await reserveAccountSend(c, { to, cc, bcc });
 	if (sendDenied) return sendDenied;
 
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);

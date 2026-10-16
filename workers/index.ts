@@ -31,7 +31,7 @@ import { claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidA
 import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDomains } from "./lib/flags";
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
-import { checkSendPlan, reserveAccountSend } from "./lib/sendPolicy";
+import { checkSendIdentity, reserveAccountSend } from "./lib/sendPolicy";
 import { MIN_MAILBOX_LOCAL_PART_LENGTH } from "../shared/mailPolicy";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -147,10 +147,10 @@ app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 // `/*` pattern above only matches sub-paths, so without this a caller could
 // read/modify/delete a mailbox they don't own.
 app.use("/api/v1/mailboxes/:mailboxId", requireMailbox);
-// All public send paths share the same plan gate; ownership is checked first.
+// Authenticate all public send paths first; plan/quota decisions need validated recipients.
 app.use("/api/v1/mailboxes/:mailboxId/*", async (c, next) => {
 	if (c.req.method === "POST" && /^\/api\/v1\/mailboxes\/[^/]+\/(?:send|emails|emails\/[^/]+\/(?:reply|forward))$/.test(c.req.path)) {
-		const denied = checkSendPlan(c);
+		const denied = checkSendIdentity(c);
 		if (denied) return denied;
 	}
 	await next();
@@ -452,7 +452,7 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), mailboxId));
 	const rateLimitError = await (stub as any).checkSendRateLimit(rateLimits);
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
-	const sendDenied = await reserveAccountSend(c);
+	const sendDenied = await reserveAccountSend(c, { to, cc, bcc });
 	if (sendDenied) return sendDenied;
 	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
@@ -551,7 +551,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), from));
 	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit(rateLimits);
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
-	const sendDenied = await reserveAccountSend(c);
+	const sendDenied = await reserveAccountSend(c, { to });
 	if (sendDenied) return sendDenied;
 
 	const subject = (reqBody.subject || "").toString();
