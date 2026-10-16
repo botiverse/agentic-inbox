@@ -32,7 +32,7 @@ import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDoma
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
 import { abortStorageDelete, accountOwner, attachmentRecordBytes, beginStorageDelete, chargeSessionWrite, finishStorageDelete, holdMailboxBytes, rememberOrphans, settleAttemptedCreate, settleCreateHold, storageQuotaResponse, storedMailBytes, storedRowBytes } from "./lib/accountStorage";
-import { checkSendPlan, reserveAuthenticatedSend } from "./lib/sendPolicy";
+import { checkSendIdentity, reserveAuthenticatedSend } from "./lib/sendPolicy";
 import { MIN_MAILBOX_LOCAL_PART_LENGTH } from "../shared/mailPolicy";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -167,12 +167,11 @@ app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 // `/*` pattern above only matches sub-paths, so without this a caller could
 // read/modify/delete a mailbox they don't own.
 app.use("/api/v1/mailboxes/:mailboxId", requireMailbox);
-// All public send paths share the same plan gate; ownership is checked first.
-// A request with no session is rejected by the login wall before it reaches
-// this router in production. Direct storage tests call the router without one.
+// Authenticate send paths first. Plan and the daily external slot run after
+// storage admission, once recipients are known.
 app.use("/api/v1/mailboxes/:mailboxId/*", async (c, next) => {
-	if (c.get("authOwner") && c.req.method === "POST" && /^\/api\/v1\/mailboxes\/[^/]+\/(?:send|emails|emails\/[^/]+\/(?:reply|forward))$/.test(c.req.path)) {
-		const denied = checkSendPlan(c);
+	if (c.req.method === "POST" && /^\/api\/v1\/mailboxes\/[^/]+\/(?:send|emails|emails\/[^/]+\/(?:reply|forward))$/.test(c.req.path)) {
+		const denied = checkSendIdentity(c);
 		if (denied) return denied;
 	}
 	await next();
@@ -506,7 +505,7 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 		storageRowKey(mailboxId, messageId),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
-	const sendDenied = await reserveAuthenticatedSend(c);
+	const sendDenied = await reserveAuthenticatedSend(c, { to, cc, bcc });
 	if (sendDenied) {
 		await held.release();
 		return sendDenied;
@@ -650,7 +649,7 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	const sentCopyId = crypto.randomUUID();
 	const senderHold = await chargeSessionWrite(c, from, storedRowBytes(common), undefined, storageRowKey(from, sentCopyId));
 	if (!senderHold.ok) return storageQuotaResponse(senderHold);
-	const sendDenied = await reserveAuthenticatedSend(c);
+	const sendDenied = await reserveAuthenticatedSend(c, { to });
 	if (sendDenied) {
 		await senderHold.release();
 		return sendDenied;

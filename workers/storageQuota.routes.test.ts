@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { Hono } from "hono";
 import { app, receiveEmail } from "./index";
+import type { MailboxContext } from "./lib/mailbox";
+
+function sendAsPro(path: string, init: RequestInit, env: unknown) {
+	const api = new Hono<MailboxContext>();
+	api.use("*", async (c, next) => { c.set("authOwner", "raft:server:human:user"); c.set("authPlan", "pro"); await next(); });
+	api.route("/", app);
+	return api.request(path, init, env as never);
+}
 
 function rawEmail(to: string) {
 	const text = ["From: sender@example.com", `To: ${to}`, "Subject: hello", "", "body text", ""].join("\r\n");
@@ -90,11 +99,11 @@ describe("storage quota on inbound and send", () => {
 			},
 			OWNER: account.binding,
 		};
-		const res = await app.request("/api/v1/mailboxes/artin@mail.build/send", {
+		const res = await sendAsPro("/api/v1/mailboxes/artin@mail.build/send", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ to: "other@mail.build", subject: "s", text: "hello" }),
-		}, env as never);
+		}, env);
 		expect(res.status).toBe(413);
 		expect((await res.json() as { code: string }).code).toBe("STORAGE_QUOTA_EXCEEDED");
 		expect(stored).toHaveLength(0);

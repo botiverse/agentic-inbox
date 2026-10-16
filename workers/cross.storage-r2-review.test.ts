@@ -1,8 +1,17 @@
 import { expect, it } from 'vitest';
+import { Hono } from 'hono';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { resolve } from 'node:path';
 import { app } from './index';
+import type { MailboxContext } from './lib/mailbox';
+
+function sendAsPro(path: string, init: RequestInit, env: unknown) {
+ const api = new Hono<MailboxContext>();
+ api.use('*', async (c, next) => { c.set('authOwner', 'raft:server:human:user'); c.set('authPlan', 'pro'); await next(); });
+ api.route('/', app);
+ return api.request(path, init, env as never);
+}
 
 
 async function withOwner(body: string, verify: (value: any) => void) {
@@ -50,6 +59,7 @@ function ledger() {
  let committed=0; const holds=new Map<string,number>(); const deletes=new Map<string,number>(); let seq=0;
  const occupied=()=>{let pending=0; for (const n of deletes.values()) pending+=n; return Math.max(0,committed-pending);};
  return {get used(){return occupied();},binding:{idFromName:(s:string)=>s,get:()=>({plan:async()=>'free',rememberPlan:async()=>{},
+  reserveSend:async()=>({ok:true,retryAt:Date.now()+86_400_000}),
   reserveStorage:async(_o:string,bytes:number)=>{const add=Math.max(0,Math.floor(bytes)); const visible=occupied(); if(add>0&&visible+add>350) return {ok:false,used:visible,limit:350}; const id=`h${++seq}`; if(add>0){holds.set(id,add); committed+=add;} return {ok:true,used:occupied(),limit:350,id};},
   cancelStorage:async(_o:string,id:string)=>{const n=holds.get(id)??0; if(holds.delete(id)) committed=Math.max(0,committed-n); return {used:occupied()};},
   commitStorage:async(_o:string,id:string)=>{holds.delete(id); return {used:occupied()};},
@@ -66,7 +76,7 @@ it('an R2 put that commits then throws must not leave an uncharged object',async
   put:async(k:string,v:Uint8Array)=>{objects.set(k,v.byteLength);if(++puts===2)throw new Error('response lost after put');},
   delete:async(keys:string[])=>{for(const key of keys)objects.delete(key);}},
   MAILBOX:{idFromName:(s:string)=>s,get:()=>({checkSendRateLimit:async()=>null})},OWNER:account.binding};
- const response=await app.request('/api/v1/mailboxes/box@mail.build/emails',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:'other@example.com',from:'box@mail.build',subject:'s',text:'body',attachments:[{content:btoa('1234'),filename:'one',type:'text/plain',disposition:'attachment'},{content:btoa('5678'),filename:'two',type:'text/plain',disposition:'attachment'}]})},env as never);
+ const response=await sendAsPro('/api/v1/mailboxes/box@mail.build/emails',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:'other@example.com',from:'box@mail.build',subject:'s',text:'body',attachments:[{content:btoa('1234'),filename:'one',type:'text/plain',disposition:'attachment'},{content:btoa('5678'),filename:'two',type:'text/plain',disposition:'attachment'}]})},env);
  expect(response.status).toBe(500);
  expect({charged:account.used,r2Bytes:[...objects.values()].reduce((a,b)=>a+b,0)}).toEqual({charged:0,r2Bytes:0});
 });

@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { Hono } from "hono";
 import { app } from "./index";
+import type { MailboxContext } from "./lib/mailbox";
+
+function sendAsPro(path: string, init: RequestInit, env: unknown) {
+ const api = new Hono<MailboxContext>();
+ api.use("*", async (c, next) => { c.set("authOwner", "raft:server:human:user"); c.set("authPlan", "pro"); await next(); });
+ api.route("/", app);
+ return api.request(path, init, env as never);
+}
 
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
@@ -52,6 +61,7 @@ function ledger(initial:number) {
  const occupied=()=>{let pending=0; for (const n of deletes.values()) pending+=n; return Math.max(0,committed-pending);};
  return {get used(){return occupied();}, binding:{idFromName:(s:string)=>s,get:()=>({
   plan:async()=>"free",rememberPlan:async()=>{},
+  reserveSend:async()=>({ok:true,retryAt:Date.now()+86_400_000}),
   reserveStorage:async(_o:string,bytes:number)=>{
    const add=Math.max(0,Math.floor(bytes)); const visible=occupied();
    if(add>0&&visible+add>350) return {ok:false,used:visible,limit:350};
@@ -90,7 +100,7 @@ it("a failed attachment batch cannot refund quota while leaving R2 objects behin
   BUCKET:{get:async()=>({json:async()=>({owner:'owner'})}),put:async(k:string,b:Uint8Array)=>{if(++puts===2)throw new Error('injected R2 failure');objects.set(k,b.byteLength);},delete:async(keys:string[])=>{for(const k of keys)objects.delete(k);}},
   MAILBOX:{idFromName:(s:string)=>s,get:()=>({checkSendRateLimit:async()=>null,createEmail:async()=>{throw new Error('should not reach');}})},OWNER:account.binding,
  };
- const response=await app.request('/api/v1/mailboxes/box@mail.build/emails',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:'someone@example.com',from:'box@mail.build',subject:'s',text:'body',attachments:[{content:btoa('1234'),filename:'one',type:'text/plain',disposition:'attachment'},{content:btoa('5678'),filename:'two',type:'text/plain',disposition:'attachment'}]})},env as never);
+ const response=await sendAsPro('/api/v1/mailboxes/box@mail.build/emails',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:'someone@example.com',from:'box@mail.build',subject:'s',text:'body',attachments:[{content:btoa('1234'),filename:'one',type:'text/plain',disposition:'attachment'},{content:btoa('5678'),filename:'two',type:'text/plain',disposition:'attachment'}]})},env);
  expect(response.status).toBe(500);
  const actual=[...objects.values()].reduce((a,b)=>a+b,0);
  expect({counter:account.used,r2Bytes:actual}).toEqual({counter:0,r2Bytes:0});

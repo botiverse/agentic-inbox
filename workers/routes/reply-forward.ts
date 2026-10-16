@@ -86,7 +86,7 @@ export async function handleReplyEmail(c: AppContext) {
 		storageRowKey(mailboxId, messageId),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
-	const sendDenied = await reserveAuthenticatedSend(c);
+	const sendDenied = await reserveAuthenticatedSend(c, { to, cc, bcc });
 	if (sendDenied) {
 		await held.release();
 		return sendDenied;
@@ -226,7 +226,7 @@ export async function handleForwardEmail(c: AppContext) {
 		storageRowKey(mailboxId, messageId),
 	);
 	if (!held.ok) return storageQuotaResponse(held);
-	const sendDenied = await reserveAuthenticatedSend(c);
+	const sendDenied = await reserveAuthenticatedSend(c, { to, cc, bcc });
 	if (sendDenied) {
 		await held.release();
 		return sendDenied;
