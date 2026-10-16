@@ -22,6 +22,11 @@ export function mailboxOf(address: string): string {
 	return deliveryMailbox((address || "").trim().toLowerCase());
 }
 
+/** Billing identity of one stored row. The mailbox matches storage addressing; the row id stays as it is. */
+export function storageRowKey(mailbox: string, rowId: string): string {
+	return `${mailboxOf(mailbox)}/${rowId}`;
+}
+
 /** R2 key holding a mailbox's settings. */
 export function mailboxKey(address: string): string {
 	return `mailboxes/${mailboxOf(address)}.json`;

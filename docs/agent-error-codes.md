@@ -36,24 +36,41 @@ and MAILBOX_NOT_LINKED — all masked as "session rejected").
 | `FORBIDDEN` | 403 | access a mailbox owned by another account | use one you own |
 | `NOT_FOUND` | 404 | mailbox / email does not exist | check the id |
 | `SEND_EXTERNAL_UNSUPPORTED` | 400 | send to a recipient outside the configured domain | v0 is internal-only; recipient must be `@<configured-domain>` and already exist |
-| `SEND_REQUIRES_PRO` | 403 | Free account attempts to send, reply or forward | use a Pro plan |
-| `SEND_QUOTA_EXCEEDED` | 429 | one account-wide send admitted within the last 24 hours | wait until `retryAt`; switching/deleting mailboxes does not reset it |
+| `SEND_REQUIRES_PRO` | 403 | Free account sends, replies or forwards to any recipient outside its Raft server | use a Pro plan for mail outside your server |
+| `SEND_QUOTA_EXCEEDED` | 429 | one account-wide external send admitted within the last 24 hours | wait until `retryAt`; switching/deleting mailboxes does not reset it |
 | `LOCALPART_TOO_SHORT` | 400 | new claim/adoption has fewer than 8 characters before @ | add a suffix within your own namespace |
 | `RATE_LIMITED` | 429 | send rate limit hit | back off and retry later |
+| `STORAGE_QUOTA_EXCEEDED` | 413 | account storage is at the plan cap (free 2GiB, pro 20GiB, summed across mailboxes) | delete mail to free space; existing mail is kept |
 
 Reachable via the agent manifest actions: `claim-mailbox`, `list-mailboxes`,
 `list-emails`, `get-email`, `release-mailbox`, `send-mail`. Human-UI-only routes
 (folders, attachments, email mutation) carry their own errors but agents don't
 reach them.
 
+## Storage quota
+
+Free accounts can store 2GiB and Pro accounts 20GiB, summed across every mailbox
+on that login owner. The counter includes mail that was already stored. A new
+message, draft, reply, forward, or inbound delivery that would pass the cap is
+refused (`STORAGE_QUOTA_EXCEEDED`, or inbound `552 Quota exceeded`) and the
+existing mail stays. Deleting a message returns its body and attachment bytes.
+Human and agent owners are counted separately. The cap is 2×1024³ and 20×1024³
+bytes.
+
 ## Send admission
 
-The plan comes from the authenticated Raft session. Free accounts receive mail
-but cannot send. A Pro Mail account (the existing Server-bound owner identity)
-has one send admission per rolling 24 hours across all its mailboxes and all
-four HTTP send routes, including internal delivery, reply and forward. Existing
-per-mailbox Flagship limits can further restrict sending; they cannot widen this
-account cap. The built-in email assistant remains draft-only.
+Same-server mail is available on Free and Pro without consuming the daily send
+allowance. The sender and every To/Cc/Bcc recipient must have mailbox owners on
+the same Raft server; sharing a mail domain is not enough. Missing or unreadable
+ownership does not establish the exemption. Case and plus-address aliases resolve
+to the same mailbox.
+
+If any recipient is outside that server, the authenticated session must be Pro.
+That account (the existing Server-bound owner identity) has one external send
+admission per rolling 24 hours across all its mailboxes and all four HTTP send
+routes, including reply and forward. Same-server mail remains available even
+when this external allowance is spent. Existing per-mailbox Flagship limits
+still apply to every send. The built-in email assistant remains draft-only.
 
 Reservation is atomic in the account Durable Object and precedes delivery or
 Sent writes. Invalid requests do not consume it. Once delivery is attempted,

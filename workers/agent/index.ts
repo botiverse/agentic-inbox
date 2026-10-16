@@ -3,7 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { mailboxKey } from "../lib/mailboxRef";
+import { mailboxKey, storageRowKey } from "../lib/mailboxRef";
 import {
 	streamText,
 	generateText,
@@ -30,6 +30,7 @@ import {
 	toolMoveEmail,
 	toolDiscardDraft,
 } from "../lib/tools";
+import { holdMailboxBytes, settleCreateHold, storedMailBytes } from "../lib/accountStorage";
 import { Folders, FOLDER_TOOL_DESCRIPTION, MOVE_FOLDER_TOOL_DESCRIPTION } from "../../shared/folders";
 import type { Env } from "../types";
 
@@ -485,28 +486,47 @@ Based on the email content and thread context above, draft a reply using draft_r
 				} else {
 					const draftId = crypto.randomUUID();
 					const draftStub = getMailboxStub(env, emailData.mailboxId);
+					const draftBody = /<[a-z][\s\S]*>/i.test(sanitizedText)
+						? sanitizedText
+						: textToHtml(sanitizedText);
 					const reSubject = emailData.subject.startsWith("Re:")
 						? emailData.subject
 						: `Re: ${emailData.subject}`;
-					await draftStub.createEmail(
-						Folders.DRAFT,
-						{
-							id: draftId,
-							subject: reSubject,
-							sender: emailData.mailboxId.toLowerCase(),
-							recipient: emailData.sender.toLowerCase(),
-							date: new Date().toISOString(),
-						// verifyDraft may return plain text or HTML depending on its
-						// code path. Only wrap in textToHtml if it's plain text.
-						body: /<[a-z][\s\S]*>/i.test(sanitizedText)
-							? sanitizedText
-							: textToHtml(sanitizedText),
-						in_reply_to: emailData.emailId,
-							email_references: null,
-							thread_id: emailData.threadId,
-						},
-						[],
-					);
+					const draftedAt = new Date().toISOString();
+					const draftHold = await holdMailboxBytes(env, emailData.mailboxId, storedMailBytes(draftBody, 0, reSubject, {
+						sender: emailData.mailboxId.toLowerCase(),
+						recipient: emailData.sender.toLowerCase(),
+						date: draftedAt,
+						inReplyTo: emailData.emailId,
+						threadId: emailData.threadId,
+					}), { rowKey: storageRowKey(emailData.mailboxId, draftId) });
+					if (!draftHold.ok) {
+						console.error("Auto-draft skipped: storage quota exceeded");
+					} else {
+						try {
+							await draftStub.createEmail(
+								Folders.DRAFT,
+								{
+									id: draftId,
+									subject: reSubject,
+									sender: emailData.mailboxId.toLowerCase(),
+									recipient: emailData.sender.toLowerCase(),
+									date: draftedAt,
+									// verifyDraft may return plain text or HTML depending on its
+									// code path. Only wrap in textToHtml if it's plain text.
+									body: draftBody,
+									in_reply_to: emailData.emailId,
+									email_references: null,
+									thread_id: emailData.threadId,
+								},
+								[],
+							);
+							await draftHold.commit();
+						} catch (e) {
+							await settleCreateHold(draftStub, draftId, draftHold);
+							throw e;
+						}
+					}
 					// Inline text saved as draft
 				}
 			}

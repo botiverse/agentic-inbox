@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { mailboxOf, mailboxKey } from "./mailboxRef";
+import { mailboxOf, mailboxKey, storageRowKey } from "./mailboxRef";
 
 describe("mailboxOf / mailboxKey", () => {
 	it("resolves a +tag address to its mailbox", () => {
@@ -13,6 +13,10 @@ describe("mailboxOf / mailboxKey", () => {
 	});
 	it("leaves a plain address alone", () => {
 		expect(mailboxKey("artin@mail.build")).toBe("mailboxes/artin@mail.build.json");
+	});
+	it("builds one row charge for an alias and keeps the row id", () => {
+		expect(storageRowKey("Box+alias@mail.build", "row-1")).toBe("box@mail.build/row-1");
+		expect(storageRowKey("box@mail.build", "row-1")).toBe("box@mail.build/row-1");
 	});
 });
 

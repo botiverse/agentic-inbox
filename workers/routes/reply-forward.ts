@@ -4,7 +4,7 @@
 
 import type { Context } from "hono";
 import { sendEmail } from "../email-sender";
-import { storeAttachments } from "../lib/attachments";
+import { AttachmentCleanupError, attachmentObjectKeys, discardAttachmentObjects, storeAttachments, type StoredAttachment } from "../lib/attachments";
 import type { EmailFull } from "../lib/schemas";
 import {
 	validateSender,
@@ -18,7 +18,9 @@ import { SendEmailRequestSchema } from "../lib/schemas";
 import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
 import { flagContext, sendRateLimits } from "../lib/flags";
-import { reserveAccountSend } from "../lib/sendPolicy";
+import { attachmentRecordBytes, chargeSessionWrite, rememberOrphans, settleAttemptedCreate, storageQuotaResponse, storedMailBytes } from "../lib/accountStorage";
+import { storageRowKey } from "../lib/mailboxRef";
+import { reserveAuthenticatedSend } from "../lib/sendPolicy";
 
 type AppContext = Context<MailboxContext>;
 type RateLimitStub = { checkSendRateLimit: (limits?: { perHour: number; perDay: number }) => Promise<string | null> };
@@ -56,11 +58,51 @@ export async function handleReplyEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
-	const sendDenied = await reserveAccountSend(c);
-	if (sendDenied) return sendDenied;
+	const sentAt = new Date().toISOString();
+	const ccStored = cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null;
+	const bccStored = bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null;
+	const replyHeaders = JSON.stringify([
+		{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
+		{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
+		...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
+		...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
+		{ key: "subject", value: subject },
+		{ key: "date", value: sentAt },
+		{ key: "message-id", value: `<${outgoingMessageId}>` },
+		...(originalMsgId ? [{ key: "in-reply-to", value: `<${originalMsgId}>` }] : []),
+		...(references.length > 0 ? [{ key: "references", value: references.map((r: string) => `<${r}>`).join(" ") }] : []),
+	]);
+	const held = await chargeSessionWrite(
+		c,
+		mailboxId,
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + attachmentRecordBytes({
+			size: atob(att.content).length, filename: att.filename, mimetype: att.type, contentId: att.contentId, disposition: att.disposition,
+		}), 0), subject, {
+			sender: fromEmail, recipient: toStr, cc: ccStored, bcc: bccStored, date: sentAt,
+			inReplyTo: originalMsgId, references: JSON.stringify(references), threadId: thread_id,
+			messageId: outgoingMessageId, rawHeaders: replyHeaders,
+		}),
+		undefined,
+		storageRowKey(mailboxId, messageId),
+	);
+	if (!held.ok) return storageQuotaResponse(held);
+	let sendDenied: Response | undefined;
+	try {
+		sendDenied = await reserveAuthenticatedSend(c, { to, cc, bcc });
+	} catch (err) {
+		await held.release();
+		throw err;
+	}
+	if (sendDenied) {
+		await held.release();
+		return sendDenied;
+	}
+	let attachmentData: StoredAttachment[] | undefined;
+	let createAttempted = false;
+	try {
+	attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
-	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
-
+	createAttempted = true;
 	await stub.createEmail(
 		Folders.SENT,
 		{
@@ -68,25 +110,15 @@ export async function handleReplyEmail(c: AppContext) {
 			subject,
 			sender: fromEmail,
 			recipient: toStr,
-			cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
-			bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
-			date: new Date().toISOString(),
+			cc: ccStored,
+			bcc: bccStored,
+			date: sentAt,
 			body: html || text || "",
 			in_reply_to: originalMsgId,
 			email_references: JSON.stringify(references),
 			thread_id: thread_id,
 			message_id: outgoingMessageId,
-			raw_headers: JSON.stringify([
-				{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
-				{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
-				...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
-				...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
-				{ key: "subject", value: subject },
-				{ key: "date", value: new Date().toISOString() },
-				{ key: "message-id", value: `<${outgoingMessageId}>` },
-				...(originalMsgId ? [{ key: "in-reply-to", value: `<${originalMsgId}>` }] : []),
-				...(references.length > 0 ? [{ key: "references", value: references.map((r: string) => `<${r}>`).join(" ") }] : []),
-			]),
+			raw_headers: replyHeaders,
 		},
 		attachmentData,
 	);
@@ -115,7 +147,32 @@ export async function handleReplyEmail(c: AppContext) {
 		}),
 	);
 
+	await held.commit();
 	return c.json({ id: messageId, status: "sent" }, 202);
+	} catch (e) {
+		if (!createAttempted) {
+			let keepCharge = e instanceof AttachmentCleanupError;
+			const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
+			if (!keepCharge && attachmentData?.length) {
+				try {
+					await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+				} catch (cleanupErr) {
+					console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+					keepCharge = true;
+					orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+				}
+			}
+			if (keepCharge && orphanKeys.length > 0) {
+				await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
+			}
+			if (!keepCharge) await held.release();
+			throw e;
+		}
+		await settleAttemptedCreate(c.env, stub, messageId, held, attachmentData);
+		throw e;
+	}
 }
 
 export async function handleForwardEmail(c: AppContext) {
@@ -150,11 +207,48 @@ export async function handleForwardEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
-	const sendDenied = await reserveAccountSend(c);
-	if (sendDenied) return sendDenied;
+	const sentAt = new Date().toISOString();
+	const ccStored = cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null;
+	const bccStored = bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null;
+	const forwardHeaders = JSON.stringify([
+		{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
+		{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
+		...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
+		...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
+		{ key: "subject", value: subject },
+		{ key: "date", value: sentAt },
+		{ key: "message-id", value: `<${outgoingMessageId}>` },
+	]);
+	const held = await chargeSessionWrite(
+		c,
+		mailboxId,
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + attachmentRecordBytes({
+			size: atob(att.content).length, filename: att.filename, mimetype: att.type, contentId: att.contentId, disposition: att.disposition,
+		}), 0), subject, {
+			sender: fromEmail, recipient: toStr, cc: ccStored, bcc: bccStored, date: sentAt,
+			messageId: outgoingMessageId, rawHeaders: forwardHeaders,
+		}),
+		undefined,
+		storageRowKey(mailboxId, messageId),
+	);
+	if (!held.ok) return storageQuotaResponse(held);
+	let sendDenied: Response | undefined;
+	try {
+		sendDenied = await reserveAuthenticatedSend(c, { to, cc, bcc });
+	} catch (err) {
+		await held.release();
+		throw err;
+	}
+	if (sendDenied) {
+		await held.release();
+		return sendDenied;
+	}
+	let attachmentData: StoredAttachment[] | undefined;
+	let createAttempted = false;
+	try {
+	attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
 
-	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
-
+	createAttempted = true;
 	await stub.createEmail(
 		Folders.SENT,
 		{
@@ -162,23 +256,15 @@ export async function handleForwardEmail(c: AppContext) {
 			subject,
 			sender: fromEmail,
 			recipient: toStr,
-			cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
-			bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
-			date: new Date().toISOString(),
+			cc: ccStored,
+			bcc: bccStored,
+			date: sentAt,
 			body: html || text || "",
 			in_reply_to: null,
 			email_references: null,
 			thread_id: messageId,
 			message_id: outgoingMessageId,
-			raw_headers: JSON.stringify([
-				{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
-				{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
-				...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
-				...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
-				{ key: "subject", value: subject },
-				{ key: "date", value: new Date().toISOString() },
-				{ key: "message-id", value: `<${outgoingMessageId}>` },
-			]),
+			raw_headers: forwardHeaders,
 		},
 		attachmentData,
 	);
@@ -204,5 +290,30 @@ export async function handleForwardEmail(c: AppContext) {
 		}),
 	);
 
+	await held.commit();
 	return c.json({ id: messageId, status: "sent" }, 202);
+	} catch (e) {
+		if (!createAttempted) {
+			let keepCharge = e instanceof AttachmentCleanupError;
+			const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
+			if (!keepCharge && attachmentData?.length) {
+				try {
+					await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+				} catch (cleanupErr) {
+					console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+					keepCharge = true;
+					orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+				}
+			}
+			if (keepCharge && orphanKeys.length > 0) {
+				await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
+			}
+			if (!keepCharge) await held.release();
+			throw e;
+		}
+		await settleAttemptedCreate(c.env, stub, messageId, held, attachmentData);
+		throw e;
+	}
 }

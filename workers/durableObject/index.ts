@@ -10,6 +10,7 @@ import * as schema from "../db/schema";
 import { Folders } from "../../shared/folders";
 import type { Env } from "../types";
 import { applyMigrations, mailboxMigrations } from "./migrations";
+import { ATTACHMENT_ROW_BYTES_SQL, EMAIL_ROW_BYTES_SQL } from "../lib/storageQuota";
 
 /**
  * SQL expression to normalize email subjects by stripping common
@@ -535,6 +536,31 @@ export class MailboxDO extends DurableObject<Env> {
 			threadId,
 		);
 		return { threadId, markedRead: true };
+	}
+
+	/** Billed bytes stored for this mailbox. Matches `storedMailBytes`. */
+	async usageBytes(): Promise<number> {
+		const bodies = [...this.ctx.storage.sql.exec(
+			`SELECT COALESCE(SUM(${EMAIL_ROW_BYTES_SQL}), 0) AS bytes FROM emails`,
+		)][0] as { bytes: number } | undefined;
+		const attachments = [...this.ctx.storage.sql.exec(
+			`SELECT COALESCE(SUM(${ATTACHMENT_ROW_BYTES_SQL}), 0) AS bytes FROM attachments`,
+		)][0] as { bytes: number } | undefined;
+		return Number(bodies?.bytes ?? 0) + Number(attachments?.bytes ?? 0);
+	}
+
+	/** Billed bytes of one message, or null when it is already gone. */
+	async measureEmailBytes(id: string): Promise<number | null> {
+		const row = [...this.ctx.storage.sql.exec(
+			`SELECT ${EMAIL_ROW_BYTES_SQL} AS bytes FROM emails WHERE id = ?1`,
+			id,
+		)][0] as { bytes: number | null } | undefined;
+		if (!row) return null;
+		const attachments = [...this.ctx.storage.sql.exec(
+			`SELECT COALESCE(SUM(${ATTACHMENT_ROW_BYTES_SQL}), 0) AS bytes FROM attachments WHERE email_id = ?1`,
+			id,
+		)][0] as { bytes: number } | undefined;
+		return Number(row.bytes ?? 0) + Number(attachments?.bytes ?? 0);
 	}
 
 	async deleteEmail(id: string) {

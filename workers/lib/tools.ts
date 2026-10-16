@@ -30,8 +30,22 @@ import { verifyDraft } from "./ai";
 import { sendEmail } from "../email-sender";
 import { Folders } from "../../shared/folders";
 import { flagContext, sendRateLimits } from "./flags";
+import { AttachmentCleanupError, attachmentObjectKeys, discardAttachmentObjects } from "./attachments";
+import { abortStorageDelete, accountOwner, beginStorageDelete, finishStorageDelete, holdMailboxBytes, rememberOrphans, settleCreateHold, storedMailBytes } from "./accountStorage";
+import { storageRowKey } from "./mailboxRef";
+import type { StoredMailFields } from "./storageQuota";
 import { stampExternalSenders } from "./externalSender";
 import type { Env } from "../types";
+
+const STORAGE_QUOTA_ERROR = "Account storage quota exceeded. Delete mail to free space. Existing mail is kept.";
+
+async function admitBody(env: Env, mailboxId: string, body: string, subject = "", fields: StoredMailFields = {}, rowKey?: string) {
+	const hold = await holdMailboxBytes(env, mailboxId, storedMailBytes(body, 0, subject, fields), { rowKey });
+	if (!hold.ok) return { ok: false as const, error: STORAGE_QUOTA_ERROR };
+	return hold;
+}
+
+
 
 // ── Type casts for DO methods not on the base stub type ────────────
 type MailboxSearchStub = {
@@ -173,7 +187,17 @@ export async function toolDraftReply(
 			})
 		: "";
 	const bodyHtml = processedBody + quotedBlock;
+	const draftedAt = new Date().toISOString();
+	const hold = await admitBody(env, mailboxId, bodyHtml, params.subject, {
+		sender: mailboxId.toLowerCase(),
+		recipient: params.to.toLowerCase(),
+		date: draftedAt,
+		inReplyTo: params.originalEmailId,
+		threadId,
+	}, storageRowKey(mailboxId, draftId));
+	if (!hold.ok) return hold;
 
+	try {
 	await stub.createEmail(
 		Folders.DRAFT,
 		{
@@ -181,7 +205,7 @@ export async function toolDraftReply(
 			subject: params.subject,
 			sender: mailboxId.toLowerCase(),
 			recipient: params.to.toLowerCase(),
-			date: new Date().toISOString(),
+			date: draftedAt,
 			body: bodyHtml,
 			in_reply_to: params.originalEmailId,
 			email_references: null,
@@ -189,6 +213,7 @@ export async function toolDraftReply(
 		},
 		[],
 	);
+	await hold.commit();
 
 	return {
 		status: "draft_saved",
@@ -201,6 +226,10 @@ export async function toolDraftReply(
 			body: params.isPlainText ? params.body.trim() : bodyHtml,
 		},
 	};
+	} catch (e) {
+		await settleCreateHold(stub, draftId, hold);
+		throw e;
+	}
 }
 
 // ── draft_email (new email, not a reply) ───────────────────────────
@@ -250,6 +279,16 @@ export async function toolDraftEmail(
 		resolvedThreadId = draftId;
 	}
 
+	const draftedAt = new Date().toISOString();
+	const hold = await admitBody(env, mailboxId, processedBody, params.subject, {
+		sender: mailboxId.toLowerCase(),
+		recipient: (params.to || "").toLowerCase(),
+		date: draftedAt,
+		inReplyTo: params.in_reply_to,
+		threadId: resolvedThreadId,
+	}, storageRowKey(mailboxId, draftId));
+	if (!hold.ok) return hold;
+	try {
 	await stub.createEmail(
 		Folders.DRAFT,
 		{
@@ -257,7 +296,7 @@ export async function toolDraftEmail(
 			subject: params.subject,
 			sender: mailboxId.toLowerCase(),
 			recipient: (params.to || "").toLowerCase(),
-			date: new Date().toISOString(),
+			date: draftedAt,
 			body: processedBody,
 			in_reply_to: params.in_reply_to || null,
 			email_references: null,
@@ -265,6 +304,7 @@ export async function toolDraftEmail(
 		},
 		[],
 	);
+	await hold.commit();
 
 	return {
 		status: "draft_saved",
@@ -277,6 +317,10 @@ export async function toolDraftEmail(
 			body: params.isPlainText ? params.body.trim() : processedBody,
 		},
 	};
+	} catch (e) {
+		await settleCreateHold(stub, draftId, hold);
+		throw e;
+	}
 }
 
 // ── update_draft ───────────────────────────────────────────────────
@@ -310,22 +354,92 @@ export async function toolUpdateDraft(
 		return { error: "Draft verification failed — keeping existing draft unchanged. Please try again." };
 	}
 
-	await stub.deleteEmail(params.draftId);
-	await stub.createEmail(
-		Folders.DRAFT,
-		{
-			id: newDraftId,
-			subject: params.subject ?? oldDraft.subject,
-			sender: mailboxId.toLowerCase(),
-			recipient: (params.to ?? oldDraft.recipient).toLowerCase(),
-			date: new Date().toISOString(),
-			body: verifiedBody,
-			in_reply_to: oldDraft.in_reply_to || null,
-			email_references: oldDraft.email_references || null,
-			thread_id: oldDraft.thread_id || newDraftId,
-		},
-		[],
-	);
+	const nextSubject = params.subject ?? oldDraft.subject ?? "";
+	const draftedAt = new Date().toISOString();
+	const recipient = (params.to ?? oldDraft.recipient).toLowerCase();
+	const threadId = oldDraft.thread_id || newDraftId;
+	const nextBytes = storedMailBytes(verifiedBody, 0, nextSubject, {
+		sender: mailboxId.toLowerCase(),
+		recipient,
+		date: draftedAt,
+		inReplyTo: oldDraft.in_reply_to,
+		references: oldDraft.email_references,
+		threadId,
+	});
+	const oldBytes = (await stub.measureEmailBytes(params.draftId)) ?? storedMailBytes(oldDraft.body, 0, oldDraft.subject ?? "", {
+		sender: oldDraft.sender,
+		recipient: oldDraft.recipient,
+		cc: oldDraft.cc,
+		bcc: oldDraft.bcc,
+		date: oldDraft.date,
+		inReplyTo: oldDraft.in_reply_to,
+		references: oldDraft.email_references,
+		threadId: oldDraft.thread_id,
+		messageId: oldDraft.message_id,
+		rawHeaders: oldDraft.raw_headers,
+	});
+	const owner = await accountOwner(env, mailboxId);
+	const removal = oldBytes > 0 ? await beginStorageDelete(env, owner, oldBytes, storageRowKey(mailboxId, params.draftId)) : null;
+	const hold = nextBytes > 0 ? await holdMailboxBytes(env, mailboxId, nextBytes, { deleteId: removal, rowKey: storageRowKey(mailboxId, newDraftId) }) : null;
+	if (hold && !hold.ok) {
+		await abortStorageDelete(env, owner, removal);
+		return { error: STORAGE_QUOTA_ERROR };
+	}
+	let deleted = false;
+	let createAttempted = false;
+	try {
+		const removed = await stub.deleteEmail(params.draftId);
+		if (removed === null) {
+			if (hold?.ok) await hold.release();
+			await abortStorageDelete(env, owner, removal);
+			return { error: "Draft was replaced concurrently" };
+		}
+		if (removed.length > 0) {
+			try {
+				await discardAttachmentObjects(env.BUCKET, params.draftId, removed);
+			} catch (cleanupErr) {
+				console.error("draft attachment cleanup failed:", (cleanupErr as Error).message);
+				const keys = attachmentObjectKeys(params.draftId, removed);
+				await rememberOrphans(env, owner, keys, oldBytes, undefined, removal).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
+				await abortStorageDelete(env, owner, removal);
+				throw new AttachmentCleanupError((cleanupErr as Error).message, keys, oldBytes);
+			}
+		}
+		deleted = true;
+		createAttempted = true;
+		await stub.createEmail(
+			Folders.DRAFT,
+			{
+				id: newDraftId,
+				subject: nextSubject,
+				sender: mailboxId.toLowerCase(),
+				recipient,
+				date: draftedAt,
+				body: verifiedBody,
+				in_reply_to: oldDraft.in_reply_to || null,
+				email_references: oldDraft.email_references || null,
+				thread_id: threadId,
+			},
+			[],
+		);
+		await finishStorageDelete(env, owner, removal);
+		if (hold?.ok) await hold.commit();
+	} catch (e) {
+		const keepOld = e instanceof AttachmentCleanupError;
+		if (!createAttempted || keepOld) {
+			if (deleted && !keepOld) await finishStorageDelete(env, owner, removal);
+			else await abortStorageDelete(env, owner, removal);
+			if (hold?.ok) await hold.release();
+			if (keepOld) return { error: "Attachment cleanup failed. Storage quota was kept." };
+			throw e;
+		}
+		const outcome = await settleCreateHold(stub, newDraftId, hold?.ok ? hold : undefined);
+		if (outcome === "present" || (outcome === "absent" && deleted)) await finishStorageDelete(env, owner, removal);
+		else await abortStorageDelete(env, owner, removal);
+		throw e;
+	}
 
 	return {
 		status: "draft_updated",
@@ -379,7 +493,33 @@ export async function toolDiscardDraft(
 	if (email.folder_id !== Folders.DRAFT) {
 		return { error: "Cannot discard: email is not a draft" };
 	}
-	await stub.deleteEmail(draftId);
+	const bytes = (await stub.measureEmailBytes(draftId)) ?? 0;
+	const owner = await accountOwner(env, mailboxId);
+	const deletion = await beginStorageDelete(env, owner, bytes, storageRowKey(mailboxId, draftId));
+	let removed!: Awaited<ReturnType<typeof stub.deleteEmail>>;
+	try {
+		removed = await stub.deleteEmail(draftId);
+	} catch (e) {
+		await abortStorageDelete(env, owner, deletion);
+		throw e;
+	}
+	if (removed === null) {
+		await abortStorageDelete(env, owner, deletion);
+		return { status: "discarded", draftId };
+	}
+	if (removed.length > 0) {
+		try {
+			await discardAttachmentObjects(env.BUCKET, draftId, removed);
+		} catch (e) {
+			console.error("draft attachment cleanup failed:", (e as Error).message);
+			await rememberOrphans(env, owner, attachmentObjectKeys(draftId, removed), bytes, undefined, deletion).catch((err) => {
+				console.error("orphan record failed:", (err as Error).message);
+			});
+			await abortStorageDelete(env, owner, deletion);
+			return { error: "Attachment cleanup failed. Storage quota was kept.", draftId };
+		}
+	}
+	await finishStorageDelete(env, owner, deletion);
 	return { status: "discarded", draftId };
 }
 
@@ -391,10 +531,36 @@ export async function toolDeleteEmail(
 	emailId: string,
 ) {
 	const stub = getMailboxStub(env, mailboxId);
-	const result = await stub.deleteEmail(emailId);
-	if (result === null) {
+	const bytes = await stub.measureEmailBytes(emailId);
+	if (bytes === null) {
 		return { error: "Email not found", emailId };
 	}
+	const owner = await accountOwner(env, mailboxId);
+	const deletion = await beginStorageDelete(env, owner, bytes, storageRowKey(mailboxId, emailId));
+	let result!: Awaited<ReturnType<typeof stub.deleteEmail>>;
+	try {
+		result = await stub.deleteEmail(emailId);
+	} catch (e) {
+		await abortStorageDelete(env, owner, deletion);
+		throw e;
+	}
+	if (result === null) {
+		await abortStorageDelete(env, owner, deletion);
+		return { status: "deleted", emailId };
+	}
+	if (result.length > 0) {
+		try {
+			await discardAttachmentObjects(env.BUCKET, emailId, result);
+		} catch (e) {
+			console.error("attachment cleanup failed:", (e as Error).message);
+			await rememberOrphans(env, owner, attachmentObjectKeys(emailId, result), bytes, undefined, deletion).catch((err) => {
+				console.error("orphan record failed:", (err as Error).message);
+			});
+			await abortStorageDelete(env, owner, deletion);
+			return { error: "Attachment cleanup failed. Storage quota was kept.", emailId };
+		}
+	}
+	await finishStorageDelete(env, owner, deletion);
 	return { status: "deleted", emailId };
 }
 
@@ -442,6 +608,18 @@ export async function toolSendReply(
 		body: originalEmail.body ?? undefined,
 	});
 	const fullBodyHtml = sanitizedBody + quotedBlock;
+	const sentAt = new Date().toISOString();
+	const referencesJson = references.length > 0 ? JSON.stringify(references) : null;
+	const hold = await admitBody(env, mailboxId, fullBodyHtml, params.subject, {
+		sender: mailboxId.toLowerCase(),
+		recipient: params.to.toLowerCase(),
+		date: sentAt,
+		inReplyTo: originalMsgId,
+		references: referencesJson,
+		threadId,
+		messageId: outgoingMessageId,
+	}, storageRowKey(mailboxId, messageId));
+	if (!hold.ok) return hold;
 
 	try {
 		await sendEmail(env.EMAIL, {
@@ -452,10 +630,12 @@ export async function toolSendReply(
 			headers: buildThreadingHeaders(originalMsgId, references),
 		});
 	} catch (e) {
+		await hold.release();
 		console.error("Email send failed:", (e as Error).message);
 		return { error: `Failed to send reply: ${(e as Error).message}` };
 	}
 
+	try {
 	await stub.createEmail(
 		Folders.SENT,
 		{
@@ -463,17 +643,21 @@ export async function toolSendReply(
 			subject: params.subject,
 			sender: mailboxId.toLowerCase(),
 			recipient: params.to.toLowerCase(),
-			date: new Date().toISOString(),
+			date: sentAt,
 			body: fullBodyHtml,
 			in_reply_to: originalMsgId,
-			email_references:
-				references.length > 0 ? JSON.stringify(references) : null,
+			email_references: referencesJson,
 			thread_id: threadId,
 			message_id: outgoingMessageId,
 		},
 		[],
 	);
+	} catch (e) {
+		await settleCreateHold(stub, messageId, hold);
+		throw e;
+	}
 
+	await hold.commit();
 	return { status: "sent", messageId, message: `Reply sent to ${params.to}` };
 }
 
@@ -508,6 +692,15 @@ export async function toolSendEmail(
 		return { error: "Draft verification failed — refusing to send unverified content. Please try again." };
 	}
 
+	const sentAt = new Date().toISOString();
+	const hold = await admitBody(env, mailboxId, sanitizedBody, params.subject, {
+		sender: mailboxId.toLowerCase(),
+		recipient: params.to.toLowerCase(),
+		date: sentAt,
+		messageId: outgoingMessageId,
+	}, storageRowKey(mailboxId, messageId));
+	if (!hold.ok) return hold;
+
 	try {
 		await sendEmail(env.EMAIL, {
 			to: params.to,
@@ -516,10 +709,12 @@ export async function toolSendEmail(
 			html: sanitizedBody,
 		});
 	} catch (e) {
+		await hold.release();
 		console.error("Email send failed:", (e as Error).message);
 		return { error: `Failed to send email: ${(e as Error).message}` };
 	}
 
+	try {
 	await stub.createEmail(
 		Folders.SENT,
 		{
@@ -527,7 +722,7 @@ export async function toolSendEmail(
 			subject: params.subject,
 			sender: mailboxId.toLowerCase(),
 			recipient: params.to.toLowerCase(),
-			date: new Date().toISOString(),
+			date: sentAt,
 			body: sanitizedBody,
 			in_reply_to: null,
 			email_references: null,
@@ -537,5 +732,10 @@ export async function toolSendEmail(
 		[],
 	);
 
+	await hold.commit();
 	return { status: "sent", messageId, message: `Email sent to ${params.to}` };
+	} catch (e) {
+		await settleCreateHold(stub, messageId, hold);
+		throw e;
+	}
 }

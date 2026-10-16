@@ -145,12 +145,21 @@ app.use("*", async (c, next) => {
 	if (c.env.RAFT_SESSION_SECRET) {
 		const session = await openSession(c.req.raw, c.env.RAFT_SESSION_SECRET);
 		if (session) {
-			c.set("authOwner", ownerFromPrincipal(session.principal));
+			const owner = ownerFromPrincipal(session.principal);
+			const plan = session.principal.plan === "pro" ? "pro" : "free";
+			c.set("authOwner", owner);
 			c.set("authScope", "account");
 			c.set("authIsAdmin", false);
 			if (session.principal.preferredUsername) c.set("authHandle", session.principal.preferredUsername);
-			c.set("authPlan", session.principal.plan === "pro" ? "pro" : "free");
+			c.set("authPlan", plan);
 			c.set("authNotifyRouting", routingFromPrincipal(session.principal));
+			// Inbound mail has no session. Remember the plan so a later delivery
+			// uses 20GiB for Pro and 2GiB otherwise. A stamp failure must not block login.
+			try {
+				await c.env.OWNER.get(c.env.OWNER.idFromName(owner)).rememberPlan(plan);
+			} catch (e) {
+				console.error("storage plan stamp failed:", (e as Error).message);
+			}
 			return next();
 		}
 	}
@@ -241,7 +250,7 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				},
 				{
 					name: "send-mail",
-					description: "Pro only: one send admission per rolling 24 hours across the account, including replies and forwards. Free accounts cannot send. An attempted delivery consumes the slot even if its outcome is uncertain; retry only after retryAt. Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service. REQUIRED body: {to, subject, text} (or `html`). `from` may be the mailbox itself OR any `+tag` sub-address of it (e.g. `you+shop@mail.build`), so a reply can go out as the alias the sender wrote to instead of disclosing the base address; any other sender is rejected. Recipients on this service (@mail.build) are delivered internally and the mailbox must already exist (else 404). External recipients are supported ONLY on an allow-listed set of domains while outbound deliverability is being verified — a non-allowed domain returns 400 `SEND_EXTERNAL_UNSUPPORTED` listing what IS allowed. An external send that the provider refuses returns 502 `SEND_FAILED`, never a false 202. ONLY to/subject/text/html are honored — any other field (in_reply_to, attachments, cc, …) is REJECTED with 400 `UNSUPPORTED_FIELD` (no threading/attachments yet), so a 202 always means exactly what you sent was delivered.",
+					description: "Same-Raft-server mail is available on all plans and does not consume the daily send allowance. If any To/Cc/Bcc recipient is outside your Raft server, Pro is required and one send admission per rolling 24 hours is shared across the account, including replies and forwards. Existing per-mailbox rate limits still apply. An attempted delivery consumes the slot even if its outcome is uncertain; retry only after retryAt. Send a message FROM a mailbox you own (the {mailboxId} in the path) TO another mailbox on this service. REQUIRED body: {to, subject, text} (or `html`). `from` may be the mailbox itself OR any `+tag` sub-address of it (e.g. `you+shop@mail.build`), so a reply can go out as the alias the sender wrote to instead of disclosing the base address; any other sender is rejected. Recipients on this service (@mail.build) are delivered internally and the mailbox must already exist (else 404). External recipients are supported ONLY on an allow-listed set of domains while outbound deliverability is being verified — a non-allowed domain returns 400 `SEND_EXTERNAL_UNSUPPORTED` listing what IS allowed. An external send that the provider refuses returns 502 `SEND_FAILED`, never a false 202. ONLY to/subject/text/html are honored — any other field (in_reply_to, attachments, cc, …) is REJECTED with 400 `UNSUPPORTED_FIELD` (no threading/attachments yet), so a 202 always means exactly what you sent was delivered.",
 					endpoint: { method: "POST", path: "/api/v1/mailboxes/{mailboxId}/send" },
 					body: {
 						to: "string (required) — recipient address on a configured domain, e.g. someone@mail.build",
@@ -268,9 +277,10 @@ app.get("/.well-known/raft-agent-manifest.json", (c) => {
 				NOT_FOUND: "404 — mailbox/email does not exist",
 				SEND_EXTERNAL_UNSUPPORTED: "400 — v0 send is internal-only (recipient must be @a-configured-domain)",
 				RATE_LIMITED: "429 — send rate limit hit; back off and retry",
-				SEND_REQUIRES_PRO: "403 — Free accounts cannot send; Pro is required",
+				SEND_REQUIRES_PRO: "403 — sending to anyone outside your Raft server requires Pro",
 				SEND_QUOTA_EXCEEDED: "429 — account has used its send slot; retry at retryAt",
 				LOCALPART_TOO_SHORT: "400 — new mailbox names need at least 8 characters before @",
+				STORAGE_QUOTA_EXCEEDED: "413 — account storage is full (free 2GiB, pro 20GiB, summed across mailboxes). Delete mail to free space. Existing mail is kept.",
 			},
 		},
 		200,

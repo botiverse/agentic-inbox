@@ -7,7 +7,7 @@ import { cors } from "hono/cors";
 import PostalMime from "postal-mime";
 import { z } from "zod";
 import { sendEmail } from "./email-sender";
-import { storeAttachments, type StoredAttachment } from "./lib/attachments";
+import { AttachmentCleanupError, attachmentObjectKeys, discardAttachmentObjects, storeAttachments, type StoredAttachment } from "./lib/attachments";
 import {
 	validateSender,
 	SenderValidationError,
@@ -23,7 +23,7 @@ import {
 } from "./lib/email-helpers";
 import { settingsWithNotify, publicInboxNotify, applySettingsUpdate } from "./lib/inboxNotify";
 import { stampExternalSenders } from "./lib/externalSender";
-import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings } from "./lib/mailboxRef";
+import { mailboxOf, mailboxKey, mailboxExists, mailboxStub, emailAgentStub, readMailboxSettings, storageRowKey } from "./lib/mailboxRef";
 import { runInboundNotify } from "./lib/agentEvents";
 import { SendEmailRequestSchema } from "./lib/schemas";
 import { parseDomains, isAddressAllowed } from "./lib/allowlist";
@@ -31,7 +31,8 @@ import { claimAllowedForHandle, classifyClaim, asciiNamespaceForHandle, isValidA
 import { mailboxQuotaLimit, sendRateLimits, flagContext, resolveExternalSendDomains } from "./lib/flags";
 import { recordOwnedMailbox, removeOwnedMailbox } from "./lib/keyRegistry";
 import { handleReplyEmail, handleForwardEmail } from "./routes/reply-forward";
-import { checkSendPlan, reserveAccountSend } from "./lib/sendPolicy";
+import { abortStorageDelete, accountOwner, attachmentRecordBytes, beginStorageDelete, chargeSessionWrite, finishStorageDelete, holdMailboxBytes, rememberOrphans, settleAttemptedCreate, settleCreateHold, storageQuotaResponse, storedMailBytes, storedRowBytes } from "./lib/accountStorage";
+import { checkSendIdentity, reserveAuthenticatedSend } from "./lib/sendPolicy";
 import { MIN_MAILBOX_LOCAL_PART_LENGTH } from "../shared/mailPolicy";
 import { Folders } from "../shared/folders";
 import type { Env } from "./types";
@@ -112,16 +113,35 @@ async function deliverToInbox(
 	stub: DurableObjectStub<MailboxDO>,
 	email: Parameters<MailboxDO["createEmail"]>[1],
 	attachments: Parameters<MailboxDO["createEmail"]>[2],
-): Promise<{ created: boolean; id: string }> {
-	const created = await stub.createEmail(Folders.INBOX, email, attachments);
-	scheduleInboxNotify(waitUntil, env, {
-		mailbox,
-		emailId: created.id,
-		from: email.sender,
-		subject: email.subject,
-		rfcMessageId: email.message_id ?? null,
-	});
-	return created;
+	opts?: { storageHeld?: boolean },
+): Promise<{ created: boolean; id: string; quotaExceeded?: boolean; used?: number; limit?: number }> {
+	let hold: { release: () => Promise<void>; commit: () => Promise<void> } | undefined;
+	if (!opts?.storageHeld) {
+		const bytes = storedRowBytes(email, attachments.reduce((sum, att) => sum + attachmentRecordBytes(att), 0));
+		const reserved = await holdMailboxBytes(env, mailbox, bytes, email.id ? { rowKey: storageRowKey(mailbox, email.id) } : undefined);
+		if (!reserved.ok) return { created: false, id: email.id, quotaExceeded: true, used: reserved.used, limit: reserved.limit };
+		hold = reserved;
+	}
+	try {
+		const created = await stub.createEmail(Folders.INBOX, email, attachments);
+		if (!created.created) await hold?.release();
+		else {
+			await hold?.commit();
+			scheduleInboxNotify(waitUntil, env, {
+				mailbox,
+				emailId: created.id,
+				from: email.sender,
+				subject: email.subject,
+				rfcMessageId: email.message_id ?? null,
+			});
+		}
+		return created;
+	} catch (e) {
+		// The RPC rejection does not say the insert rolled back. Release only
+		// when this id is confirmed absent; a failed lookup keeps the reservation.
+		await settleCreateHold(stub, email.id, hold);
+		throw e;
+	}
 }
 
 // -- App & middleware -----------------------------------------------
@@ -147,10 +167,11 @@ app.use("/api/v1/mailboxes/:mailboxId/*", requireMailbox);
 // `/*` pattern above only matches sub-paths, so without this a caller could
 // read/modify/delete a mailbox they don't own.
 app.use("/api/v1/mailboxes/:mailboxId", requireMailbox);
-// All public send paths share the same plan gate; ownership is checked first.
+// Authenticate send paths first. Plan and the daily external slot run after
+// storage admission, once recipients are known.
 app.use("/api/v1/mailboxes/:mailboxId/*", async (c, next) => {
 	if (c.req.method === "POST" && /^\/api\/v1\/mailboxes\/[^/]+\/(?:send|emails|emails\/[^/]+\/(?:reply|forward))$/.test(c.req.path)) {
-		const denied = checkSendPlan(c);
+		const denied = checkSendIdentity(c);
 		if (denied) return denied;
 	}
 	await next();
@@ -389,6 +410,9 @@ app.delete("/api/v1/mailboxes/:mailboxId", async (c: AppContext) => {
 	const owner = c.get("authOwner");
 	if (owner) {
 		const ownerStub = c.env.OWNER.get(c.env.OWNER.idFromName(owner));
+		// Mail and attachments stay in the mailbox Durable Object and in R2.
+		// The byte counter stays charged; releasing the slot must not free that
+		// budget. Adopting a different mailbox still pays for the mail inside it.
 		await ownerStub.release(owner, mailboxId);
 		await removeOwnedMailbox(c.env, owner, mailboxId);
 	}
@@ -452,26 +476,86 @@ app.post("/api/v1/mailboxes/:mailboxId/emails", async (c: AppContext) => {
 	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), mailboxId));
 	const rateLimitError = await (stub as any).checkSendRateLimit(rateLimits);
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
-	const sendDenied = await reserveAccountSend(c);
-	if (sendDenied) return sendDenied;
-	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
-
-	await stub.createEmail(Folders.SENT, {
+	const sentAt = new Date().toISOString();
+	const sentHeaders = JSON.stringify([
+		{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
+		{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
+		...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
+		...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
+		{ key: "subject", value: subject }, { key: "date", value: sentAt },
+		{ key: "message-id", value: `<${outgoingMessageId}>` },
+	]);
+	const held = await chargeSessionWrite(
+		c,
+		mailboxId,
+		storedMailBytes(html || text || "", (attachments ?? []).reduce((sum, att) => sum + attachmentRecordBytes({
+			size: atob(att.content).length, filename: att.filename, mimetype: att.type, contentId: att.contentId, disposition: att.disposition,
+		}), 0), subject, {
+			sender: fromEmail, recipient: toStr,
+			cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc) : "",
+			bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc) : "",
+			date: sentAt,
+			inReplyTo: in_reply_to || "",
+			references: references ? JSON.stringify(references) : "",
+			threadId: (thread_id || in_reply_to) && (thread_id || in_reply_to) !== messageId ? (thread_id || in_reply_to) : "",
+			messageId: outgoingMessageId,
+			rawHeaders: sentHeaders,
+		}),
+		undefined,
+		storageRowKey(mailboxId, messageId),
+	);
+	if (!held.ok) return storageQuotaResponse(held);
+	let sendDenied: Response | undefined;
+	try {
+		sendDenied = await reserveAuthenticatedSend(c, { to, cc, bcc });
+	} catch (err) {
+		await held.release();
+		throw err;
+	}
+	if (sendDenied) {
+		await held.release();
+		return sendDenied;
+	}
+	let attachmentData: Awaited<ReturnType<typeof storeAttachments>> | undefined;
+	let createAttempted = false;
+	try {
+		attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
+		createAttempted = true;
+		await stub.createEmail(Folders.SENT, {
 		id: messageId, subject, sender: fromEmail, recipient: toStr,
 		cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
 		bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
-		date: new Date().toISOString(), body: html || text || "",
+		date: sentAt, body: html || text || "",
 		in_reply_to: in_reply_to || null, email_references: references ? JSON.stringify(references) : null,
 		thread_id: thread_id || in_reply_to || messageId, message_id: outgoingMessageId,
-		raw_headers: JSON.stringify([
-			{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
-			{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
-			...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
-			...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
-			{ key: "subject", value: subject }, { key: "date", value: new Date().toISOString() },
-			{ key: "message-id", value: `<${outgoingMessageId}>` },
-		]),
+		raw_headers: sentHeaders,
 	}, attachmentData);
+	} catch (e) {
+		// storeAttachments failed before createEmail. That write was not attempted.
+		if (!createAttempted) {
+			let keepCharge = e instanceof AttachmentCleanupError;
+			const orphanKeys: string[] = e instanceof AttachmentCleanupError ? [...e.keys] : [];
+			if (!keepCharge && attachmentData?.length) {
+				try {
+					await discardAttachmentObjects(c.env.BUCKET, messageId, attachmentData);
+				} catch (cleanupErr) {
+					console.error("attachment cleanup failed:", (cleanupErr as Error).message);
+					keepCharge = true;
+					orphanKeys.push(...attachmentObjectKeys(messageId, attachmentData));
+				}
+			}
+			if (keepCharge && held.ok && orphanKeys.length > 0) {
+				await rememberOrphans(c.env, held.owner, orphanKeys, held.bytes, held.id).catch((err) => {
+					console.error("orphan record failed:", (err as Error).message);
+				});
+			}
+			if (!keepCharge) await held.release();
+			throw e;
+		}
+		await settleAttemptedCreate(c.env, stub, messageId, held, attachmentData);
+		throw e;
+	}
+	await held.commit();
 
 	c.executionCtx.waitUntil(
 		sendEmail(c.env.EMAIL, {
@@ -551,8 +635,6 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	const rateLimits = await sendRateLimits(c.env.FLAGS, flagContext(c.get("authOwner"), from));
 	const rateLimitError = await (c.var.mailboxStub as any).checkSendRateLimit(rateLimits);
 	if (rateLimitError) return c.json({ error: rateLimitError, code: "RATE_LIMITED" }, 429);
-	const sendDenied = await reserveAccountSend(c);
-	if (sendDenied) return sendDenied;
 
 	const subject = (reqBody.subject || "").toString();
 	const content = (reqBody.html || reqBody.text || "").toString();
@@ -570,17 +652,49 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			{ key: "x-agentic-inbox-delivery", value: "internal" },
 		]),
 	};
+	const sentCopyId = crypto.randomUUID();
+	const senderHold = await chargeSessionWrite(c, from, storedRowBytes(common), undefined, storageRowKey(from, sentCopyId));
+	if (!senderHold.ok) return storageQuotaResponse(senderHold);
+	let sendDenied: Response | undefined;
+	try {
+		sendDenied = await reserveAuthenticatedSend(c, { to });
+	} catch (err) {
+		await senderHold.release();
+		throw err;
+	}
+	if (sendDenied) {
+		await senderHold.release();
+		return sendDenied;
+	}
 	if (isInternal) {
 		// Deliver into the recipient's inbox, and keep a copy in the sender's Sent.
+		// The recipient's copy is charged to the recipient's account inside deliverToInbox.
 		const toStub = mailboxStub(c.env, toMailbox);
-		const created = await deliverToInbox(honoWaitUntil(c), c.env, toMailbox, toStub, { id: messageId, ...common }, []);
-		await c.var.mailboxStub.createEmail(Folders.SENT, { id: crypto.randomUUID(), ...common }, []);
+		let created: { created: boolean; id: string; quotaExceeded?: boolean; used?: number; limit?: number };
+		try {
+			created = await deliverToInbox(honoWaitUntil(c), c.env, toMailbox, toStub, { id: messageId, ...common }, []);
+		} catch (e) {
+			await senderHold.release();
+			throw e;
+		}
+		if (created.quotaExceeded) {
+			await senderHold.release();
+			return storageQuotaResponse({ ok: false, used: created.used ?? 0, limit: created.limit ?? 0 });
+		}
+		try {
+			await c.var.mailboxStub.createEmail(Folders.SENT, { id: sentCopyId, ...common }, []);
+		} catch (e) {
+			await settleCreateHold(c.var.mailboxStub, sentCopyId, senderHold);
+			throw e;
+		}
+		await senderHold.commit();
 		return c.json({ id: created.id, status: "sent", delivery: "internal" }, 202);
 	}
 
 	// External: hand to Cloudflare Email Sending. Failures are reported LOUDLY —
 	// a 202 must never mean "queued and maybe dropped", which is the exact lie we
-	// removed from the inbound path today.
+	// removed from the inbound path today. A provider refusal stores nothing, so
+	// the storage reservation is released.
 	try {
 		await sendEmail(c.env.EMAIL, {
 			to,
@@ -600,11 +714,13 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 	} catch (e) {
 		const msg = (e as Error).message || "unknown error";
 		console.error("External send failed:", msg);
+		await senderHold.release();
 		return c.json({ error: `External send failed: ${msg}`, code: "SEND_FAILED", to }, 502);
 	}
 	// Only record it as Sent once the provider accepted it.
+	try {
 	await c.var.mailboxStub.createEmail(Folders.SENT, {
-		id: crypto.randomUUID(),
+		id: sentCopyId,
 		...common,
 		raw_headers: JSON.stringify([
 			{ key: "from", value: from }, { key: "to", value: to },
@@ -613,6 +729,11 @@ app.post("/api/v1/mailboxes/:mailboxId/send", async (c: AppContext) => {
 			{ key: "x-agentic-inbox-delivery", value: "external" },
 		]),
 	}, []);
+	} catch (e) {
+		await settleCreateHold(c.var.mailboxStub, sentCopyId, senderHold);
+		throw e;
+	}
+	await senderHold.commit();
 	return c.json({ id: messageId, status: "sent", delivery: "external", to }, 202);
 });
 
@@ -620,16 +741,75 @@ app.post("/api/v1/mailboxes/:mailboxId/drafts", async (c: AppContext) => {
 	const mailboxId = c.req.param("mailboxId")!;
 	const { to, cc, bcc, subject, body, in_reply_to, thread_id, draft_id } = DraftBody.parse(await c.req.json());
 	const stub = c.var.mailboxStub;
-	if (draft_id) await stub.deleteEmail(draft_id); // not atomic — create-then-delete would be safer
+	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
 	const messageId = crypto.randomUUID();
 	const now = new Date().toISOString();
-	await stub.createEmail(Folders.DRAFT, {
+	const draftRow = {
 		id: messageId, subject: subject || "", sender: mailboxId.toLowerCase(),
 		recipient: (to || "").toLowerCase(), cc: cc?.toLowerCase() || null, bcc: bcc?.toLowerCase() || null,
-		date: now, body, in_reply_to: in_reply_to || null, email_references: null,
+		date: now, body, in_reply_to: in_reply_to || null, email_references: null as string | null,
 		thread_id: thread_id || in_reply_to || messageId,
-	}, []);
-	return c.json({ id: messageId, status: "draft", subject: subject || "", recipient: to || "", date: now }, 201);
+	};
+	const nextBytes = storedRowBytes(draftRow);
+	const oldBytes = draft_id ? (await stub.measureEmailBytes(draft_id) ?? 0) : 0;
+	// Name the old row's bytes before anyone deletes it. The reserve below is the
+	// next await that loses the draft; do not add another await after it returns.
+	const removal = draft_id && oldBytes > 0 ? await beginStorageDelete(c.env, owner, oldBytes, storageRowKey(mailboxId, draft_id)) : null;
+	const held = nextBytes > 0 ? await chargeSessionWrite(c, mailboxId, nextBytes, removal, storageRowKey(mailboxId, messageId)) : null;
+	if (held && !held.ok) {
+		await abortStorageDelete(c.env, owner, removal);
+		return storageQuotaResponse(held);
+	}
+	let deleted = false;
+	let createAttempted = false;
+	try {
+		if (draft_id) {
+			const removed = await stub.deleteEmail(draft_id);
+			if (removed === null) {
+				// The other replacement already took this draft and its old-byte credit.
+				if (held?.ok) await held.release();
+				await abortStorageDelete(c.env, owner, removal);
+				return c.json({ error: "Draft was replaced concurrently", code: "CONFLICT" }, 409);
+			}
+			if (removed.length > 0) {
+				try {
+					await discardAttachmentObjects(c.env.BUCKET, draft_id, removed);
+				} catch (cleanupErr) {
+					console.error("draft attachment cleanup failed:", (cleanupErr as Error).message);
+					const keys = attachmentObjectKeys(draft_id, removed);
+					await rememberOrphans(c.env, owner, keys, oldBytes, undefined, removal).catch((err) => {
+						console.error("orphan record failed:", (err as Error).message);
+					});
+					await abortStorageDelete(c.env, owner, removal);
+					throw new AttachmentCleanupError((cleanupErr as Error).message, keys, oldBytes);
+				}
+			}
+			deleted = true;
+		}
+		createAttempted = true;
+		await stub.createEmail(Folders.DRAFT, draftRow, []);
+		await finishStorageDelete(c.env, owner, removal);
+		if (held?.ok) await held.commit();
+		return c.json({ id: messageId, status: "draft", subject: subject || "", recipient: to || "", date: now }, 201);
+	} catch (e) {
+		// Attachment cleanup fails before createEmail. The new row was not attempted,
+		// so its reservation can be released. The old objects keep their charge.
+		const keepOld = e instanceof AttachmentCleanupError;
+		if (!createAttempted || keepOld) {
+			if (deleted && !keepOld) await finishStorageDelete(c.env, owner, removal);
+			else await abortStorageDelete(c.env, owner, removal);
+			if (held?.ok) await held.release();
+			throw e;
+		}
+		// createEmail threw. `stored` is not durability: confirm this id, and refund
+		// only when it is absent. An unknown read keeps the new reservation. The old
+		// delete is not finished unless the new row is present or confirmed absent,
+		// so an ambiguous result cannot lend those bytes out.
+		const outcome = await settleCreateHold(stub, messageId, held?.ok ? held : undefined);
+		if (outcome === "present" || (outcome === "absent" && deleted)) await finishStorageDelete(c.env, owner, removal);
+		else await abortStorageDelete(c.env, owner, removal);
+		throw e;
+	}
 });
 
 app.get("/api/v1/mailboxes/:mailboxId/emails/:emailId", async (c: AppContext) => {
@@ -668,10 +848,53 @@ app.put("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 
 app.delete("/api/v1/mailboxes/:mailboxId/emails/:id", async (c: AppContext) => {
 	const id = c.req.param("id")!;
-	const attachments = await c.var.mailboxStub.deleteEmail(id);
-	if (attachments === null) return c.json({ error: "Not found" }, 404);
-	if (attachments.length > 0) await c.env.BUCKET.delete(attachments.map((att: any) => `attachments/${id}/${att.id}/${att.filename}`));
-	return c.body(null, 204);
+	const mailboxId = c.req.param("mailboxId")!;
+	const bytes = await c.var.mailboxStub.measureEmailBytes(id);
+	if (bytes === null) return c.json({ error: "Not found" }, 404);
+	const owner = await accountOwner(c.env, mailboxId, c.get("authOwner"));
+	const deletion = await beginStorageDelete(c.env, owner, bytes, storageRowKey(mailboxId, id));
+	let deleted = false;
+	let cleanupFailed = false;
+	let refundMoved = false;
+	try {
+		const attachments = await c.var.mailboxStub.deleteEmail(id);
+		if (attachments === null) {
+			// Lost a race with another delete. That request returns the bytes.
+			await abortStorageDelete(c.env, owner, deletion);
+			return c.body(null, 204);
+		}
+		deleted = true;
+		if (attachments.length > 0) {
+			try {
+				await discardAttachmentObjects(c.env.BUCKET, id, attachments);
+			} catch (e) {
+				cleanupFailed = true;
+				console.error("attachment cleanup failed:", (e as Error).message);
+				// The row is gone and the objects are not. Move this delete's refund
+				// onto the orphan before abort. A later complete of the same id,
+				// including one reached because abort never got to the ledger, subtracts nothing.
+				try {
+					await rememberOrphans(c.env, owner, attachmentObjectKeys(id, attachments), bytes, undefined, deletion);
+					refundMoved = true;
+				} catch (err) {
+					console.error("orphan record failed:", (err as Error).message);
+				}
+				await abortStorageDelete(c.env, owner, deletion);
+				return c.json({ error: "Attachment cleanup failed. Storage quota was kept.", code: "ATTACHMENT_CLEANUP_FAILED" }, 500);
+			}
+		}
+		await finishStorageDelete(c.env, owner, deletion);
+		return c.body(null, 204);
+	} catch (e) {
+		// The row is still there when deleted is false. Drop the prepared delete.
+		// The row is gone only proves the mailbox row was removed. Complete the
+		// delete when cleanup succeeded, or when the orphan already owns the refund.
+		// If cleanup failed before that transfer, abort instead of refunding.
+		if (deleted && (!cleanupFailed || refundMoved)) await finishStorageDelete(c.env, owner, deletion);
+		else await abortStorageDelete(c.env, owner, deletion);
+		console.error("delete failed:", (e as Error).message);
+		return c.json({ error: "Delete failed. Storage quota was kept.", code: "DELETE_FAILED" }, 500);
+	}
 });
 
 app.post("/api/v1/mailboxes/:mailboxId/emails/:id/move", async (c: AppContext) => {
@@ -797,6 +1020,26 @@ function rejectInbound(event: InboundEmailMessage, reason: string) {
 	console.log(`Cannot setReject (unavailable); dropping instead: ${reason}`);
 }
 
+/** Delete attempted inbound objects, then refund. An unconfirmed delete keeps the charge and the keys. */
+async function releaseInboundAttachments(
+	env: Env,
+	hold: { owner: string; bytes: number; id: string; release: () => Promise<void> },
+	messageId: string,
+	stored: StoredAttachment[],
+): Promise<void> {
+	try {
+		await discardAttachmentObjects(env.BUCKET, messageId, stored);
+		await hold.release();
+	} catch (cleanupErr) {
+		console.error("inbound attachment cleanup failed:", (cleanupErr as Error).message);
+		const keys = attachmentObjectKeys(messageId, stored);
+		if (keys.length === 0) return;
+		await rememberOrphans(env, hold.owner, keys, hold.bytes, hold.id).catch((err) => {
+			console.error("orphan record failed:", (err as Error).message);
+		});
+	}
+}
+
 async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: ExecutionContext) {
 	const rawEmail = await streamToArrayBuffer(event.raw, event.rawSize);
 	const parsedEmail = await new PostalMime().parse(rawEmail);
@@ -858,40 +1101,73 @@ async function receiveEmail(event: InboundEmailMessage, env: Env, ctx: Execution
 	}
 
 	const stub = mailboxStub(env, deliveryAddress);
-
-	const attachmentData: StoredAttachment[] = [];
-	if (parsedEmail.attachments) {
-		for (const att of parsedEmail.attachments) {
-			const attId = crypto.randomUUID();
-			const filename = (att.filename || "untitled").replace(/[\/\\:*?"<>|\x00-\x1f]/g, "_");
-			await env.BUCKET.put(`attachments/${messageId}/${attId}/${filename}`, att.content);
-			attachmentData.push({ id: attId, email_id: messageId, filename, mimetype: att.mimeType,
-				size: typeof att.content === "string" ? att.content.length : att.content.byteLength,
-				content_id: att.contentId || null, disposition: att.disposition || "attachment" });
-		}
-	}
-
+	const inboundBody = parsedEmail.html || parsedEmail.text || "";
+	const pendingAttachments = (parsedEmail.attachments ?? []).map((att) => {
+		const attId = crypto.randomUUID();
+		const filename = (att.filename || "untitled").replace(/[\/\\:*?"<>|\x00-\x1f]/g, "_");
+		const size = typeof att.content === "string" ? att.content.length : att.content.byteLength;
+		return { attId, filename, size, att };
+	});
 	const extractMsgId = (s: string) => { const m = s.match(/<([^>]+)>/); return m ? m[1] : s.trim().split(/\s+/)[0]; };
 	const inReplyTo = parsedEmail.inReplyTo ? extractMsgId(parsedEmail.inReplyTo) : null;
 	const emailReferences = parsedEmail.references ? parsedEmail.references.split(/\s+/).filter(Boolean).map(extractMsgId) : [];
 	let threadId = emailReferences[0] || inReplyTo || messageId;
-
 	if (!inReplyTo && emailReferences.length === 0) {
 		const subjectThread = await (stub as any).findThreadBySubject(parsedEmail.subject || "", parsedEmail.from?.address || undefined);
 		if (subjectThread) threadId = subjectThread;
 	}
-
 	const originalMessageId = parsedEmail.messageId ? extractMsgId(parsedEmail.messageId) : null;
-
-	const created = await deliverToInbox(ctx.waitUntil.bind(ctx), env, deliveryAddress, stub, {
+	const receivedAt = new Date().toISOString(); // uses receive time, not the email's Date header
+	const inboundRow = {
 		id: messageId, subject: parsedEmail.subject || "",
 		sender: (parsedEmail.from?.address || "").toLowerCase(), recipient: allRecipients.join(", "),
 		cc: ccRecipients.join(", ") || null, bcc: bccRecipients.join(", ") || null,
-		date: new Date().toISOString(), // uses receive time, not the email's Date header
-		body: parsedEmail.html || parsedEmail.text || "",
+		date: receivedAt,
+		body: inboundBody,
 		in_reply_to: inReplyTo, email_references: emailReferences.length > 0 ? JSON.stringify(emailReferences) : null,
 		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
-	}, attachmentData);
+	};
+	const attachmentData: StoredAttachment[] = [];
+	const inboundHold = await holdMailboxBytes(
+		env,
+		deliveryAddress,
+		storedRowBytes(inboundRow, pendingAttachments.reduce((sum, item) => sum + attachmentRecordBytes({
+			size: item.size, filename: item.filename, mimetype: item.att.mimeType,
+			contentId: item.att.contentId, disposition: item.att.disposition || "attachment",
+		}), 0)),
+		{ rowKey: storageRowKey(deliveryAddress, messageId) },
+	);
+	if (!inboundHold.ok) {
+		// Cloudflare's setReject only takes a reason string. The text carries 552,
+		// the mailbox-full code, so the connecting server can surface it.
+		rejectInbound(event, "552 Quota exceeded");
+		return;
+	}
+
+	try {
+		for (const item of pendingAttachments) {
+			// Record the key before put. A committed object whose response is lost is still deleted.
+			const stored: StoredAttachment = {
+				id: item.attId, email_id: messageId, filename: item.filename, mimetype: item.att.mimeType,
+				size: item.size, content_id: item.att.contentId || null, disposition: item.att.disposition || "attachment",
+			};
+			attachmentData.push(stored);
+			await env.BUCKET.put(`attachments/${messageId}/${item.attId}/${item.filename}`, item.att.content);
+		}
+	} catch (e) {
+		await releaseInboundAttachments(env, inboundHold, messageId, attachmentData);
+		throw e;
+	}
+
+	let created: { created: boolean; id: string };
+	try {
+		created = await deliverToInbox(ctx.waitUntil.bind(ctx), env, deliveryAddress, stub, inboundRow, attachmentData, { storageHeld: true });
+	} catch (e) {
+		await settleAttemptedCreate(env, stub, messageId, inboundHold, attachmentData);
+		throw e;
+	}
+	if (!created.created) await releaseInboundAttachments(env, inboundHold, messageId, attachmentData);
+	else await inboundHold.commit();
 	const storedId = created.id;
 
 	// Built-in AI auto-draft is OPT-IN and OFF by default. Firing it on every

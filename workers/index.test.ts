@@ -10,10 +10,39 @@ function requestAsPro(path: string, init: RequestInit, env: unknown) {
 	api.use("*", async (c, next) => { c.set("authOwner", "test"); c.set("authScope", "account"); c.set("authPlan", "pro"); await next(); });
 	api.route("/", app);
 	return api.request(path, init, { ...(env as object), OWNER: {
-		idFromName: (id: string) => id, get: () => ({ reserveSend: async () => ({ ok: true, retryAt: 0 }) }),
+		idFromName: (id: string) => id,
+		get: () => ({
+			reserveSend: async () => ({ ok: true, retryAt: 0 }),
+			plan: async () => "pro" as const,
+			rememberPlan: async () => {},
+			reserveStorage: async () => ({ ok: true, used: 0, limit: 10, id: "hold" }),
+			cancelStorage: async () => ({ used: 0 }),
+			commitStorage: async () => ({ used: 0 }),
+			openStorageDelete: async () => ({ id: "del", used: 0 }),
+			completeStorageDelete: async () => ({ used: 0 }),
+			abortStorageDelete: async () => ({ used: 0 }),
+			retainOrphans: async () => {},
+		}),
 	} } as never);
 }
 
+
+function admittingOwner() {
+	return {
+		idFromName: (id: string) => id,
+		get: () => ({
+			plan: async () => "free",
+			rememberPlan: async () => {},
+			reserveStorage: async () => ({ ok: true, used: 0, limit: 10, id: "hold" }),
+			cancelStorage: async () => ({ used: 0 }),
+			commitStorage: async () => ({ used: 0 }),
+			openStorageDelete: async () => ({ id: "del", used: 0 }),
+			completeStorageDelete: async () => ({ used: 0 }),
+			abortStorageDelete: async () => ({ used: 0 }),
+			retainOrphans: async () => {},
+		}),
+	};
+}
 
 // These hit the mailbox-create validation path, which returns before any
 // Cloudflare binding (R2/DO) is touched — so they run in plain Node with an
@@ -123,6 +152,7 @@ function envWithMailboxes(existing: string[]) {
 			}),
 		},
 		EMAIL_AGENT: { idFromName: (n: string) => n, get: () => ({ fetch: async () => new Response("") }) },
+		OWNER: admittingOwner(),
 	} as never;
 	return { heads, doNames, stored, sent, waited, env };
 }
@@ -258,6 +288,7 @@ describe("internal send resolves a +tag recipient to its base mailbox", () => {
 					checkSendRateLimit: async () => null,
 				}),
 			},
+			OWNER: admittingOwner(),
 		} as never;
 		const res = await requestAsPro(
 			`/api/v1/mailboxes/postel@mail.build/send`,
@@ -318,6 +349,7 @@ describe("send routing: internal / allow-listed external / refused", () => {
 					checkSendRateLimit: async () => null,
 				}),
 			},
+			OWNER: admittingOwner(),
 		} as never;
 		return { e, sent, stored };
 	}
@@ -404,7 +436,9 @@ describe("INBOX writes only go through deliverToInbox", () => {
 			let bodyEnd = -1;
 			if (fn >= 0) {
 				// Skip the parameter/return-type braces (`stub: { … }`, `Promise<{ … }>`).
-				const marker = "\n): Promise<{ created: boolean; id: string }> {";
+				// The return type grew when storage admission was added; the marker must
+				// still land on the function body's opening brace.
+				const marker = "\n): Promise<{ created: boolean; id: string; quotaExceeded?: boolean; used?: number; limit?: number }> {";
 				const sigEnd = text.indexOf(marker, fn);
 				bodyStart = sigEnd >= 0 ? sigEnd + marker.length - 1 : -1;
 				let depth = 0;
