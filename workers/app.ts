@@ -33,6 +33,7 @@ import {
 	isBrowserCallbackFlow,
 	GENERIC_LOGIN_FAILURE,
 } from "./lib/raftAuth";
+import { isAuthExemptPath } from "./lib/authExempt";
 import { routingFromPrincipal } from "./lib/inboxNotify";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8h
@@ -58,17 +59,6 @@ function wantsHtmlRedirect(request: Request): boolean {
 	const path = new URL(request.url).pathname;
 	if (path.startsWith("/api/")) return false;
 	return (request.headers.get("Accept") ?? "").includes("text/html");
-}
-
-/** Paths that must never be gated by the auth middleware: the login flow and the
- * public agent-behavior manifest (the Raft integration CLI fetches it anonymously). */
-function isAuthExemptPath(pathname: string): boolean {
-	return (
-		pathname.startsWith("/auth/raft/") ||
-		pathname === "/auth/callback" ||
-		pathname === "/.well-known/raft-agent-manifest.json" ||
-		pathname === "/health"
-	);
 }
 
 /** mail.build's public landing page for signed-out visitors — product intro + a
@@ -131,7 +121,7 @@ app.use("*", async (c, next) => {
 		return next();
 	}
 
-	// Login-flow endpoints establish identity; they must never be auth-gated.
+	// Login, health, the agent manifest, and the public help page are not a session.
 	const path = new URL(c.req.url).pathname;
 	if (isAuthExemptPath(path)) {
 		return next();

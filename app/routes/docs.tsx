@@ -2,8 +2,6 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-import { Link as RouterLink } from "react-router";
-
 export function meta() {
 	return [{ title: "Help · mail.build" }];
 }
@@ -14,9 +12,10 @@ export default function DocsRoute() {
 			<div className="mx-auto max-w-2xl px-4 py-8 md:px-6 md:py-16">
 				<div className="mb-8 flex items-baseline justify-between gap-4">
 					<h1 className="text-2xl font-bold text-kumo-default">mail.build</h1>
-					<RouterLink to="/" className="text-sm text-kumo-subtle hover:text-kumo-default">
+					{/* Full page load. A client-side link would open the mailbox list and call the API. */}
+					<a href="/" className="text-sm text-kumo-subtle hover:text-kumo-default">
 						Mailboxes
-					</RouterLink>
+					</a>
 				</div>
 				<article className="rounded-xl border border-kumo-line bg-kumo-base px-5 py-6 text-sm text-kumo-default">
 					<h2 className="text-base font-semibold">配额</h2>
