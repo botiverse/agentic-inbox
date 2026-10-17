@@ -4,7 +4,12 @@
 
 import { Button, Empty } from "@cloudflare/kumo";
 import { WarningIcon } from "@phosphor-icons/react";
-import { useNavigate } from "react-router";
+import { data, useNavigate } from "react-router";
+
+// The splat route matches, so the document would otherwise be HTTP 200.
+export function loader() {
+	return data(null, { status: 404 });
+}
 
 export default function NotFoundRoute() {
 	const navigate = useNavigate();
