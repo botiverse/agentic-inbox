@@ -5,7 +5,7 @@
 import { Button, Input, Tooltip } from "@cloudflare/kumo";
 import { GearSixIcon, ListIcon, MagnifyingGlassIcon, RobotIcon, XIcon } from "@phosphor-icons/react";
 import { type KeyboardEvent, useEffect, useState } from "react";
-import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
+import { Link as RouterLink, useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { useUIStore } from "~/hooks/useUIStore";
 
 export default function Header() {
@@ -119,6 +119,12 @@ export default function Header() {
 			)}
 
 			<div className="flex items-center gap-1 ml-auto shrink-0">
+				<RouterLink
+					to="/docs"
+					className="text-sm text-kumo-subtle hover:text-kumo-default px-2"
+				>
+					Help
+				</RouterLink>
 				<Tooltip content={isAgentPanelOpen ? "Hide agent panel" : "Show agent panel"} side="bottom" asChild>
 					<Button
 						variant={isAgentPanelOpen ? "secondary" : "ghost"}

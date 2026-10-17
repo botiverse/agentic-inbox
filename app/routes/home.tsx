@@ -118,8 +118,13 @@ export default function HomeRoute() {
 		<div className="min-h-screen bg-kumo-recessed">
 			<div className="mx-auto max-w-2xl px-4 py-8 md:px-6 md:py-16">
 				<div className="mb-8">
-					<div className="flex items-center justify-between">
-						<h1 className="text-2xl font-bold text-kumo-default">Mailboxes</h1>
+					<div className="flex items-center justify-between gap-3">
+						<div className="flex items-baseline gap-4">
+							<h1 className="text-2xl font-bold text-kumo-default">Mailboxes</h1>
+							<RouterLink to="/docs" className="text-sm text-kumo-subtle hover:text-kumo-default">
+								Help
+							</RouterLink>
+						</div>
 						<Button
 							variant="primary"
 							icon={<PlusIcon size={16} />}
