@@ -61,12 +61,45 @@ function wantsHtmlRedirect(request: Request): boolean {
 	return (request.headers.get("Accept") ?? "").includes("text/html");
 }
 
-/** mail.build's public landing page for signed-out visitors — product intro + a
- * "Login with Raft" call to action (instead of bouncing straight into OAuth).
- * `loginHref` already carries the `next` param so login returns them where they
- * were headed. Self-contained (inline styles) so it needs no SPA/assets. */
+/** mail.build's public landing page for signed-out visitors — plan differences,
+ * a link to /docs, and a "Login with Raft" call to action (instead of bouncing
+ * straight into OAuth). `loginHref` already carries the `next` param so login
+ * returns them where they were headed. Self-contained (inline styles) so it
+ * needs no SPA/assets. The numbers match /docs. */
 function landingHtml(loginHref: string): string {
-	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mail.build</title><style>:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#fafafa;color:#111}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}.card{max-width:460px;width:100%;text-align:center}h1{font-size:34px;line-height:1.15;margin:0 0 14px;font-weight:700}p{font-size:16px;line-height:1.55;color:#444;margin:0 0 28px}.btn{display:inline-flex;align-items:center;gap:8px;background:#111;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:12px 22px;border-radius:10px}.btn:hover{background:#000}</style></head><body><div class="wrap"><div class="card"><h1>mail.build</h1><p>Sign in with Raft to claim a mailbox and start sending and receiving.</p><a class="btn" href="${loginHref}">Login with Raft &rarr;</a></div></div></body></html>`;
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mail.build</title><style>
+:root{color-scheme:light}*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#fafafa;color:#111}
+.wrap{min-height:100vh;display:flex;justify-content:center;padding:48px 24px}
+.card{max-width:720px;width:100%}
+.login{text-align:center}
+h1{font-size:34px;line-height:1.15;margin:0 0 14px;font-weight:700}
+.lead{font-size:16px;line-height:1.55;color:#444;margin:0 0 28px}
+.btn{display:inline-flex;align-items:center;gap:8px;background:#111;color:#fff;text-decoration:none;font-size:15px;font-weight:600;padding:12px 22px;border-radius:10px}
+.btn:hover{background:#000}
+.help{display:inline-block;margin-top:16px;color:#111;font-size:14px}
+h2{font-size:16px;margin:36px 0 12px}
+table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}
+th,td{padding:10px 12px 10px 0;border-bottom:1px solid #e6e6e6;vertical-align:top}
+th{font-weight:600}
+.notes{margin:16px 0 0;padding-left:18px;color:#444;font-size:14px;line-height:1.55}
+.notes li{margin:0 0 8px}
+</style></head><body><div class="wrap"><div class="card"><div class="login"><h1>mail.build</h1><p class="lead">Sign in with Raft to claim a mailbox and start sending and receiving.</p><a class="btn" href="${loginHref}">Login with Raft &rarr;</a><div><a class="help" href="/docs">帮助</a></div></div>
+<h2>配额</h2>
+<table><thead><tr><th></th><th>Free</th><th>Pro</th></tr></thead><tbody>
+<tr><th>邮箱数量</th><td>1 个</td><td>10 个</td></tr>
+<tr><th>存储</th><td>2×1024³ 字节</td><td>20×1024³ 字节</td></tr>
+<tr><th>向本 Raft 服务器以外发信</th><td>不能发</td><td>整个账号滚动 24 小时 1 封</td></tr>
+<tr><th>同一 Raft 服务器内发信</th><td>不占上面那份额度</td><td>不占上面那份额度</td></tr>
+<tr><th>每个邮箱的频率</th><td>每小时 20 封，每天 100 封</td><td>每小时 20 封，每天 100 封</td></tr>
+</tbody></table>
+<ul class="notes">
+<li>人和 Agent 的身份分开计数。存储按这一个登录名下的邮箱合计。存储超过上限时只拒绝新写入。已有的信保留，不会自动删除。</li>
+<li>付费的外部额度是整个账号滚动 24 小时 1 封，不是自然日，也不是每个邮箱一封。收件人里有一个在本 Raft 服务器以外，就按外部发信计算。</li>
+<li>同一服务器是指双方邮箱的主人都在这个 Raft 服务器上。只共享 @mail.build 不够。同一服务器内的信也计算每个邮箱的频率。</li>
+<li>每封信都标为不可信数据。这能降低 Prompt Injection 风险，不能保证挡住注入。</li>
+<li>不在同一个 Raft 服务器的发件人会标成外部，默认不唤醒 Agent。邮箱主人加进白名单的外部地址或域名仍会唤醒，但那封信照样标成外部。</li>
+</ul>
+</div></div></body></html>`;
 }
 
 export { MailboxDO } from "./durableObject";
