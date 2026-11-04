@@ -5,6 +5,7 @@
 import { PaperclipIcon, FileIcon, ImageIcon } from "@phosphor-icons/react";
 import { formatBytes, getAttachmentUrl, getNonInlineAttachments } from "~/lib/utils";
 import type { Attachment } from "~/types";
+import { useUi } from "~/i18n/useLocale";
 
 interface EmailAttachmentListProps {
 	mailboxId?: string;
@@ -23,6 +24,7 @@ export default function EmailAttachmentList({
 	className,
 	showHeading = false,
 }: EmailAttachmentListProps) {
+	const ui = useUi();
 	if (!mailboxId) return null;
 
 	const files = getNonInlineAttachments(attachments);
@@ -34,7 +36,9 @@ export default function EmailAttachmentList({
 				<div className="flex items-center gap-2 mb-2">
 					<PaperclipIcon size={14} className="text-kumo-subtle" />
 					<span className="text-sm font-medium text-kumo-default">
-						{files.length} attachment{files.length !== 1 ? "s" : ""}
+						{files.length === 1
+							? ui.attachmentOne
+							: ui.attachmentCount.replace("{n}", String(files.length))}
 					</span>
 				</div>
 			)}

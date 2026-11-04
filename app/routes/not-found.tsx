@@ -5,6 +5,8 @@
 import { Button, Empty } from "@cloudflare/kumo";
 import { WarningIcon } from "@phosphor-icons/react";
 import { data, useNavigate } from "react-router";
+import LanguageSwitch from "~/components/LanguageSwitch";
+import { useUi } from "~/i18n/useLocale";
 
 // The splat route matches, so the document would otherwise be HTTP 200.
 export function loader() {
@@ -13,16 +15,18 @@ export function loader() {
 
 export default function NotFoundRoute() {
 	const navigate = useNavigate();
+	const ui = useUi();
 
 	return (
-		<div className="flex items-center justify-center min-h-screen">
+		<div className="flex min-h-screen flex-col items-center justify-center gap-4">
+			<LanguageSwitch />
 			<Empty
 				icon={<WarningIcon size={48} className="text-kumo-inactive" />}
-				title="404 -- Page Not Found"
-				description="The page you're looking for doesn't exist."
+				title={ui.notFoundTitle}
+				description={ui.notFoundDescription}
 				contents={
 					<Button variant="primary" size="sm" onClick={() => navigate("/")}>
-						Go Home
+						{ui.goHome}
 					</Button>
 				}
 			/>

@@ -20,6 +20,8 @@ import { Folders, SYSTEM_FOLDER_IDS } from "shared/folders";
 import { useCreateFolder, useFolders } from "~/queries/folders";
 import { useMailbox } from "~/queries/mailboxes";
 import { useUIStore } from "~/hooks/useUIStore";
+import { systemFolderLabel } from "~/i18n/folders";
+import { useUi } from "~/i18n/useLocale";
 
 const FOLDER_ICONS: Record<string, React.ReactNode> = {
 	[Folders.INBOX]: <TrayIcon size={18} weight="regular" />,
@@ -30,11 +32,11 @@ const FOLDER_ICONS: Record<string, React.ReactNode> = {
 };
 
 const SYSTEM_FOLDER_LINKS = [
-	{ id: Folders.INBOX, label: "Inbox" },
-	{ id: Folders.SENT, label: "Sent" },
-	{ id: Folders.DRAFT, label: "Drafts" },
-	{ id: Folders.ARCHIVE, label: "Archive" },
-	{ id: Folders.TRASH, label: "Trash" },
+	Folders.INBOX,
+	Folders.SENT,
+	Folders.DRAFT,
+	Folders.ARCHIVE,
+	Folders.TRASH,
 ];
 
 interface FolderLinkProps {
@@ -82,6 +84,7 @@ export default function Sidebar() {
 	const { data: currentMailbox } = useMailbox(mailboxId);
 	const [isCreateFolderOpen, setIsCreateFolderOpen] = useState(false);
 	const [newFolderName, setNewFolderName] = useState("");
+	const ui = useUi();
 
 	const customFolders = useMemo(
 		() =>
@@ -104,7 +107,7 @@ export default function Sidebar() {
 	};
 
 	const displayName = useMemo(() => {
-		if (!currentMailbox) return mailboxId?.split("@")[0] || "Mailbox";
+		if (!currentMailbox) return mailboxId?.split("@")[0] || ui.mailboxFallback;
 		// Prefer settings.fromName > name > local part of email
 		if (currentMailbox.settings?.fromName) {
 			return currentMailbox.settings.fromName;
@@ -113,7 +116,7 @@ export default function Sidebar() {
 			return currentMailbox.name;
 		}
 		return currentMailbox.email.split("@")[0] || currentMailbox.name;
-	}, [currentMailbox, mailboxId]);
+	}, [currentMailbox, mailboxId, ui.mailboxFallback]);
 
 	const handleNavClick = () => {
 		// Close mobile sidebar on navigation
@@ -133,7 +136,7 @@ export default function Sidebar() {
 					className="flex items-center gap-1.5 text-kumo-subtle text-sm hover:text-kumo-default transition-colors mb-2.5 cursor-pointer bg-transparent border-0 p-0"
 				>
 					<CaretLeftIcon size={14} />
-					<span>Mailboxes</span>
+					<span>{ui.mailboxes}</span>
 				</button>
 				<div className="px-1">
 					<div className="text-base font-semibold text-kumo-default truncate">
@@ -153,19 +156,19 @@ export default function Sidebar() {
 					onClick={() => startCompose()}
 					className="w-full"
 				>
-					Compose
+					{ui.compose}
 				</Button>
 			</div>
 
 			{/* Navigation */}
 			<nav className="flex-1 overflow-y-auto px-2 space-y-0.5">
-				{SYSTEM_FOLDER_LINKS.map((folder) => (
+				{SYSTEM_FOLDER_LINKS.map((folderId) => (
 					<FolderLink
-						key={folder.id}
-						to={`/mailbox/${mailboxId}/emails/${folder.id}`}
-						icon={FOLDER_ICONS[folder.id]}
-						label={folder.label}
-						unreadCount={getUnreadCount(folder.id)}
+						key={folderId}
+						to={`/mailbox/${mailboxId}/emails/${folderId}`}
+						icon={FOLDER_ICONS[folderId]}
+						label={systemFolderLabel(ui, folderId) ?? folderId}
+						unreadCount={getUnreadCount(folderId)}
 						onClick={handleNavClick}
 					/>
 				))}
@@ -175,16 +178,16 @@ export default function Sidebar() {
 					<div className="pt-5">
 						<div className="flex items-center justify-between px-3 mb-1.5">
 							<span className="text-xs uppercase tracking-wider font-semibold text-kumo-subtle">
-								Folders
+								{ui.folders}
 							</span>
-							<Tooltip content="New folder" asChild>
+							<Tooltip content={ui.newFolder} asChild>
 								<Button
 									variant="ghost"
 									shape="square"
 									size="sm"
 									icon={<PlusIcon size={16} />}
 									onClick={() => setIsCreateFolderOpen(true)}
-									aria-label="Create new folder"
+									aria-label={ui.createNewFolder}
 								/>
 							</Tooltip>
 						</div>
@@ -206,16 +209,16 @@ export default function Sidebar() {
 					<div className="pt-5">
 						<div className="flex items-center justify-between px-3 mb-1.5">
 							<span className="text-xs uppercase tracking-wider font-semibold text-kumo-subtle">
-								Folders
+								{ui.folders}
 							</span>
-							<Tooltip content="New folder" asChild>
+							<Tooltip content={ui.newFolder} asChild>
 								<Button
 									variant="ghost"
 									shape="square"
 									size="sm"
 									icon={<PlusIcon size={16} />}
 									onClick={() => setIsCreateFolderOpen(true)}
-									aria-label="Create new folder"
+									aria-label={ui.createNewFolder}
 								/>
 							</Tooltip>
 						</div>
@@ -230,12 +233,12 @@ export default function Sidebar() {
 			>
 				<Dialog size="sm" className="p-6">
 					<Dialog.Title className="text-base font-semibold mb-4">
-						Create folder
+						{ui.createFolder}
 					</Dialog.Title>
 					<form onSubmit={handleCreateFolder} className="space-y-4">
 						<Input
-							label="Folder name"
-							placeholder="e.g. Projects"
+							label={ui.folderName}
+							placeholder={ui.folderPlaceholder}
 							value={newFolderName}
 							onChange={(e) => setNewFolderName(e.target.value)}
 							required
@@ -244,7 +247,7 @@ export default function Sidebar() {
 							<Dialog.Close
 								render={(props) => (
 									<Button {...props} variant="secondary">
-										Cancel
+										{ui.cancel}
 									</Button>
 								)}
 							/>
@@ -253,7 +256,7 @@ export default function Sidebar() {
 								variant="primary"
 								disabled={!newFolderName.trim()}
 							>
-								Create
+								{ui.create}
 							</Button>
 						</div>
 					</form>

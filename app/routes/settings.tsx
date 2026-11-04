@@ -7,10 +7,10 @@ import { RobotIcon, ArrowCounterClockwiseIcon } from "@phosphor-icons/react";
 import { useEffect, useState } from "react";
 import { useParams } from "react-router";
 import { useMailbox, useUpdateMailbox } from "~/queries/mailboxes";
+import { useUi } from "~/i18n/useLocale";
 
-// Placeholder shown in the textarea when no custom prompt is set.
 // The authoritative default prompt lives in workers/agent/index.ts (DEFAULT_SYSTEM_PROMPT).
-const PROMPT_PLACEHOLDER = `You are an email assistant that helps manage this inbox. You read emails, draft replies, and help organize conversations.\n\nWrite like a real person. Short, direct, flowing prose. Plain text only.\n\n(Leave empty to use the full built-in default prompt)`;
+// This placeholder is only the empty-state sample in the textarea.
 
 export default function SettingsRoute() {
 	const { mailboxId } = useParams<{ mailboxId: string }>();
@@ -21,6 +21,7 @@ export default function SettingsRoute() {
 	const [displayName, setDisplayName] = useState("");
 	const [agentPrompt, setAgentPrompt] = useState("");
 	const [isSaving, setIsSaving] = useState(false);
+	const ui = useUi();
 
 	useEffect(() => {
 		if (mailbox) {
@@ -39,10 +40,10 @@ export default function SettingsRoute() {
 		};
 		try {
 			await updateMailboxMutation.mutateAsync({ mailboxId, settings });
-			toastManager.add({ title: "Settings saved!" });
+			toastManager.add({ title: ui.settingsSaved });
 		} catch {
 			toastManager.add({
-				title: "Failed to save settings",
+				title: ui.settingsFailed,
 				variant: "error",
 			});
 		} finally {
@@ -66,21 +67,21 @@ export default function SettingsRoute() {
 
 	return (
 		<div className="max-w-2xl px-4 py-4 md:px-8 md:py-6 h-full overflow-y-auto">
-			<h1 className="text-lg font-semibold text-kumo-default mb-6">Settings</h1>
+			<h1 className="text-lg font-semibold text-kumo-default mb-6">{ui.settings}</h1>
 
 			<div className="space-y-6">
 				{/* Account */}
 				<div className="rounded-lg border border-kumo-line bg-kumo-base p-5">
 					<div className="text-sm font-medium text-kumo-default mb-4">
-						Account
+						{ui.account}
 					</div>
 					<div className="space-y-3">
 						<Input
-							label="Display Name"
+							label={ui.displayName}
 							value={displayName}
 							onChange={(e) => setDisplayName(e.target.value)}
 						/>
-						<Input label="Email" type="email" value={mailbox.email} disabled />
+						<Input label={ui.email} type="email" value={mailbox.email} disabled />
 					</div>
 				</div>
 
@@ -90,12 +91,12 @@ export default function SettingsRoute() {
 						<div className="flex items-center gap-2">
 							<RobotIcon size={16} weight="duotone" className="text-kumo-subtle" />
 							<span className="text-sm font-medium text-kumo-default">
-								AI Agent Prompt
+								{ui.agentPrompt}
 							</span>
 							{isCustomPrompt ? (
-								<Badge variant="primary">Custom</Badge>
+								<Badge variant="primary">{ui.custom}</Badge>
 							) : (
-								<Badge variant="secondary">Default</Badge>
+								<Badge variant="secondary">{ui.default}</Badge>
 							)}
 						</div>
 						{isCustomPrompt && (
@@ -105,31 +106,29 @@ export default function SettingsRoute() {
 								icon={<ArrowCounterClockwiseIcon size={14} />}
 								onClick={handleResetPrompt}
 							>
-								Reset to default
+								{ui.resetDefault}
 							</Button>
 						)}
 					</div>
 					<p className="text-xs text-kumo-subtle mb-3">
-						Customize how the AI agent behaves for this mailbox.
-						Leave empty to use the built-in default prompt.
+						{ui.agentPromptLead}
 					</p>
 					<textarea
 						value={agentPrompt}
 						onChange={(e) => setAgentPrompt(e.target.value)}
-						placeholder={PROMPT_PLACEHOLDER}
+						placeholder={ui.promptPlaceholder}
 						rows={12}
 						className="w-full resize-y rounded-lg border border-kumo-line bg-kumo-recessed px-3 py-2 text-xs text-kumo-default placeholder:text-kumo-subtle focus:outline-none focus:ring-1 focus:ring-kumo-ring font-mono leading-relaxed"
 					/>
 					<p className="text-xs text-kumo-subtle mt-2">
-						The prompt is sent as the system message to the AI model.
-						It controls the agent's personality, writing style, and behavior rules.
+						{ui.agentPromptFoot}
 					</p>
 				</div>
 
 				{/* Save */}
 				<div className="flex justify-end">
 					<Button variant="primary" onClick={handleSave} loading={isSaving}>
-						Save Changes
+						{ui.saveChanges}
 					</Button>
 				</div>
 			</div>

@@ -33,6 +33,9 @@ import {
 import { useFolders } from "~/queries/folders";
 import { queryKeys } from "~/queries/keys";
 import { useUIStore } from "~/hooks/useUIStore";
+import { systemFolderLabel } from "~/i18n/folders";
+import type { UiCopy } from "~/i18n/ui";
+import { useUi } from "~/i18n/useLocale";
 import type { Email } from "~/types";
 
 const PAGE_SIZE = 25;
@@ -41,43 +44,40 @@ const FOLDER_EMPTY_STATES: Record<
 	string,
 	{
 		icon: React.ReactNode;
-		title: string;
-		description: string;
+		title: keyof UiCopy;
+		description: keyof UiCopy;
 		showCompose?: boolean;
 	}
 > = {
 	[Folders.INBOX]: {
 		icon: <TrayIcon size={48} weight="thin" className="text-kumo-subtle" />,
-		title: "Your inbox is empty",
-		description:
-			"New emails will appear here when they arrive. Send an email to get the conversation started.",
+		title: "inboxEmpty",
+		description: "inboxEmptyLead",
 		showCompose: true,
 	},
 	[Folders.SENT]: {
 		icon: (
 			<PaperPlaneTiltIcon size={48} weight="thin" className="text-kumo-subtle" />
 		),
-		title: "No sent emails",
-		description: "Emails you send will show up here.",
+		title: "sentEmpty",
+		description: "sentEmptyLead",
 		showCompose: true,
 	},
 	[Folders.DRAFT]: {
 		icon: <FileIcon size={48} weight="thin" className="text-kumo-subtle" />,
-		title: "No drafts",
-		description: "Emails you're still working on will be saved here.",
+		title: "draftsEmpty",
+		description: "draftsEmptyLead",
 		showCompose: true,
 	},
 	[Folders.ARCHIVE]: {
 		icon: <ArchiveIcon size={48} weight="thin" className="text-kumo-subtle" />,
-		title: "Archive is empty",
-		description:
-			"Move emails here to keep your inbox clean without deleting them.",
+		title: "archiveEmpty",
+		description: "archiveEmptyLead",
 	},
 	[Folders.TRASH]: {
 		icon: <TrashIcon size={48} weight="thin" className="text-kumo-subtle" />,
-		title: "Trash is empty",
-		description:
-			"Deleted emails will appear here. You can restore them or permanently delete them.",
+		title: "trashEmpty",
+		description: "trashEmptyLead",
 	},
 };
 
@@ -110,31 +110,31 @@ function FolderEmptyState({
 	folder?: string;
 	onCompose: () => void;
 }) {
-	const config = (folder && FOLDER_EMPTY_STATES[folder]) || {
-		icon: (
-			<EnvelopeSimpleIcon size={48} weight="thin" className="text-kumo-subtle" />
-		),
-		title: "No emails",
-		description: "This folder is empty.",
-	};
+	const ui = useUi();
+	const config = folder ? FOLDER_EMPTY_STATES[folder] : undefined;
+	const icon = config?.icon ?? (
+		<EnvelopeSimpleIcon size={48} weight="thin" className="text-kumo-subtle" />
+	);
+	const title = config ? ui[config.title] : ui.folderEmpty;
+	const description = config ? ui[config.description] : ui.folderEmptyLead;
 
 	return (
 		<div className="flex flex-col items-center justify-center py-24 px-6 text-center">
-			<div className="mb-4">{config.icon}</div>
+			<div className="mb-4">{icon}</div>
 			<h3 className="text-base font-semibold text-kumo-default mb-1.5">
-				{config.title}
+				{title}
 			</h3>
 			<p className="text-sm text-kumo-subtle max-w-xs mb-5">
-				{config.description}
+				{description}
 			</p>
-			{"showCompose" in config && config.showCompose && (
+			{config?.showCompose && (
 				<Button
 					variant="primary"
 					size="sm"
 					icon={<PencilSimpleIcon size={16} />}
 					onClick={onCompose}
 				>
-					Compose
+					{ui.compose}
 				</Button>
 			)}
 		</div>
@@ -154,6 +154,7 @@ export default function EmailListRoute() {
 		startCompose,
 	} = useUIStore();
 	const [page, setPage] = useState(1);
+	const ui = useUi();
 
 	const queryClient = useQueryClient();
 	const updateEmail = useUpdateEmail();
@@ -180,10 +181,12 @@ export default function EmailListRoute() {
 	const { data: folders = [] } = useFolders(mailboxId);
 
 	const folderName = useMemo(() => {
+		const localized = systemFolderLabel(ui, folder);
+		if (localized) return localized;
 		const found = folders.find((f) => f.id === folder);
 		if (found) return found.name;
-		return folder ? folder.charAt(0).toUpperCase() + folder.slice(1) : "Inbox";
-	}, [folders, folder]);
+		return folder || ui.inbox;
+	}, [folders, folder, ui]);
 
 	const isPanelOpen = selectedEmailId !== null || isComposing;
 
@@ -215,7 +218,7 @@ export default function EmailListRoute() {
 		e.preventDefault();
 		e.stopPropagation();
 		if (mailboxId) {
-			const confirmed = window.confirm("Are you sure you want to delete this email?");
+			const confirmed = window.confirm(ui.deleteEmailConfirm);
 			if (!confirmed) return;
 			deleteEmail.mutate({ mailboxId, id: emailId });
 			if (selectedEmailId === emailId) closePanel();
@@ -266,7 +269,7 @@ export default function EmailListRoute() {
 			if (names.length <= 3) return names.join(", ");
 			return `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
 		}
-		return (email.from || "").split("@")[0] || "(unknown)";
+		return (email.from || "").split("@")[0] || ui.unknownSender;
 	};
 
 	return (
@@ -282,11 +285,13 @@ export default function EmailListRoute() {
 					<div className="flex items-center gap-1">
 						{totalCount > 0 && (
 							<span className="text-sm text-kumo-subtle mr-2 hidden sm:inline">
-								{totalCount} conversation{totalCount !== 1 ? "s" : ""}
+								{totalCount === 1
+									? ui.conversationOne
+									: ui.conversationCount.replace("{n}", String(totalCount))}
 							</span>
 						)}
 						<Tooltip
-							content={isRefreshing ? "Refreshing..." : "Refresh"}
+							content={isRefreshing ? ui.refreshing : ui.refresh}
 							side="bottom"
 							asChild
 						>
@@ -302,7 +307,7 @@ export default function EmailListRoute() {
 								}
 								onClick={handleRefresh}
 								disabled={isRefreshing}
-								aria-label="Refresh"
+								aria-label={ui.refresh}
 							/>
 						</Tooltip>
 					</div>
@@ -376,11 +381,11 @@ export default function EmailListRoute() {
 												)}
 												{email.has_draft && (
 													<span className="shrink-0 text-xs text-kumo-destructive font-medium">
-														Draft
+														{ui.draft}
 													</span>
 												)}
 												{email.needs_reply && !email.has_draft && (
-													<Tooltip content="Needs reply" asChild>
+													<Tooltip content={ui.needsReply} asChild>
 														<span className="shrink-0 text-kumo-warning">
 															<ArrowBendUpLeftIcon size={14} weight="bold" />
 														</span>
@@ -406,7 +411,7 @@ export default function EmailListRoute() {
 
 										{/* Hover actions */}
 										<div className="hidden group-hover:flex items-center shrink-0">
-											<Tooltip content={email.read ? "Mark unread" : "Mark read"} asChild>
+											<Tooltip content={email.read ? ui.markUnread : ui.markRead} asChild>
 												<Button
 													variant="ghost"
 													shape="square"
@@ -421,17 +426,17 @@ export default function EmailListRoute() {
 																data: { read: !email.read },
 															});
 													}}
-													aria-label={email.read ? "Mark unread" : "Mark read"}
+													aria-label={email.read ? ui.markUnread : ui.markRead}
 												/>
 											</Tooltip>
-											<Tooltip content="Delete" asChild>
+											<Tooltip content={ui.delete} asChild>
 												<Button
 													variant="ghost"
 													shape="square"
 													size="sm"
 													icon={<TrashIcon size={14} />}
 													onClick={(e) => handleDelete(e, email.id)}
-													aria-label="Delete"
+													aria-label={ui.delete}
 												/>
 											</Tooltip>
 										</div>

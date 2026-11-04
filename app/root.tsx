@@ -22,8 +22,14 @@ import {
 	Scripts,
 	ScrollRestoration,
 } from "react-router";
+import { localeFromRequest } from "../shared/locale";
+import { useLocale, useUi } from "~/i18n/useLocale";
 import { ApiError } from "~/services/api";
 import "./index.css";
+
+export function loader({ request }: { request: Request }) {
+	return { locale: localeFromRequest(request) };
+}
 
 function makeQueryClient() {
 	return new QueryClient({
@@ -76,8 +82,9 @@ const KumoLink = forwardRef<
 });
 
 export function Layout({ children }: { children: React.ReactNode }) {
+	const locale = useLocale();
 	return (
-		<html lang="en">
+		<html lang={locale}>
 			<head>
 				<meta charSet="UTF-8" />
 				<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -127,16 +134,16 @@ export default function App() {
 }
 
 export function ErrorBoundary({ error }: { error: unknown }) {
-	let title = "Something went wrong";
-	let description = "An unexpected error occurred. Please try again.";
+	const ui = useUi();
+	let title = ui.errorTitle;
+	let description = ui.errorDescription;
 	let status: number | null = null;
 
 	if (isRouteErrorResponse(error)) {
 		status = error.status;
 		if (error.status === 404) {
-			title = "Page not found";
-			description =
-				"The page you're looking for doesn't exist or has been moved.";
+			title = ui.notFoundTitle;
+			description = ui.notFoundDescription;
 		} else {
 			title = `Error ${error.status}`;
 			description = error.statusText || description;
@@ -149,7 +156,7 @@ export function ErrorBoundary({ error }: { error: unknown }) {
 		<div className="flex items-center justify-center min-h-screen p-8">
 			<Empty
 				icon={<WarningIcon size={48} className="text-kumo-inactive" />}
-				title={status === 404 ? "404 — Page not found" : title}
+				title={status === 404 ? ui.notFoundTitle : title}
 				description={description}
 				contents={
 					<Button
@@ -158,7 +165,7 @@ export function ErrorBoundary({ error }: { error: unknown }) {
 							window.location.href = "/";
 						}}
 					>
-						Go Home
+						{ui.goHome}
 					</Button>
 				}
 			/>

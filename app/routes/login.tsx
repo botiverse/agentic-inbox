@@ -4,9 +4,20 @@
 
 import { Button, Text } from "@cloudflare/kumo";
 import { EnvelopeIcon } from "@phosphor-icons/react";
+import LanguageSwitch from "~/components/LanguageSwitch";
+import { uiCopy } from "~/i18n/ui";
+import { useUi } from "~/i18n/useLocale";
+import { isLocale } from "../../shared/locale";
 
-export function meta() {
-	return [{ title: "Sign in · mail.build" }];
+export function meta({
+	matches,
+}: {
+	matches?: Array<{ id?: string; data?: unknown }>;
+}) {
+	const root = matches?.find((match) => match.id === "root");
+	const data = root?.data as { locale?: string } | undefined;
+	const locale = isLocale(data?.locale) ? data.locale : "en";
+	return [{ title: uiCopy[locale].signInTitle }];
 }
 
 /**
@@ -18,6 +29,7 @@ export function meta() {
  * `next` preserves where the user was headed so we can bounce back after auth.
  */
 export default function LoginRoute() {
+	const ui = useUi();
 	const next = typeof window !== "undefined" ? window.location.pathname + window.location.search : "/";
 	const loginUrl = `/auth/raft/login?next=${encodeURIComponent(next === "/login" ? "/" : next)}`;
 
@@ -35,8 +47,9 @@ export default function LoginRoute() {
 				<EnvelopeIcon size={40} weight="duotone" style={{ margin: "0 auto" }} />
 				<div style={{ display: "grid", gap: "0.375rem" }}>
 					<h1 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700 }}>mail.build</h1>
-					<Text color="muted">Sign in to claim a mailbox and read your email.</Text>
+					<Text color="muted">{ui.signInLead}</Text>
 				</div>
+				<LanguageSwitch />
 				<Button
 					variant="primary"
 					size="lg"
@@ -44,7 +57,7 @@ export default function LoginRoute() {
 						window.location.href = loginUrl;
 					}}
 				>
-					Login with Raft
+					{ui.loginWithRaft}
 				</Button>
 			</div>
 		</div>

@@ -4,26 +4,28 @@
 
 import { Loader } from "@cloudflare/kumo";
 import { useEffect, useState } from "react";
+import { useUi } from "~/i18n/useLocale";
 
 function LazyAgentPanel() {
 	const [AgentChat, setAgentChat] = useState<React.ComponentType | null>(
 		null,
 	);
-	const [loadError, setLoadError] = useState<string | null>(null);
+	const [loadError, setLoadError] = useState(false);
+	const ui = useUi();
 
 	useEffect(() => {
 		import("~/components/AgentPanel").then((mod) => {
 			setAgentChat(() => mod.default);
 		}).catch((err) => {
 			console.error("Failed to load AgentPanel:", err);
-			setLoadError("Failed to load agent panel");
+			setLoadError(true);
 		});
 	}, []);
 
 	if (loadError) {
 		return (
 			<div className="flex items-center justify-center h-full">
-				<span className="text-xs text-kumo-error">{loadError}</span>
+				<span className="text-xs text-kumo-error">{ui.loadAgentFailed}</span>
 			</div>
 		);
 	}
@@ -31,7 +33,7 @@ function LazyAgentPanel() {
 		return (
 			<div className="flex flex-col items-center justify-center h-full gap-2">
 				<Loader size="base" />
-				<span className="text-xs text-kumo-subtle">Loading agent...</span>
+				<span className="text-xs text-kumo-subtle">{ui.loadingAgent}</span>
 			</div>
 		);
 	}
