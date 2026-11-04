@@ -23,6 +23,7 @@ import {
 	emailBodyHtml,
 } from "~/lib/utils";
 import type { Email } from "~/types";
+import { useUi } from "~/i18n/useLocale";
 
 interface ThreadMessageProps {
 	email: Email;
@@ -72,9 +73,10 @@ export default function ThreadMessage({
 	onPreviewImage,
 }: ThreadMessageProps) {
 	const { from, to } = displayFromTo(email);
+	const ui = useUi();
 	const isSelf = from === mailboxEmail;
 	const containerClassName = `${!isLast ? "border-b border-kumo-line" : ""} ${isDraft ? "border-l-2 border-l-kumo-warning bg-kumo-warning/[0.02]" : ""}`;
-	const senderLabel = isDraft ? "Draft reply" : isSelf ? "You" : from;
+	const senderLabel = isDraft ? ui.draftReply : isSelf ? ui.you : from;
 
 	if (!isExpanded) {
 		return (
@@ -116,7 +118,7 @@ export default function ThreadMessage({
 							type="button"
 							onClick={onToggleExpand}
 							className="shrink-0"
-							aria-label="Collapse message"
+							aria-label={ui.collapse}
 						>
 							<div className="cursor-pointer hover:ring-2 hover:ring-kumo-brand/30 transition-shadow rounded-full">
 								<Avatar isDraft={isDraft} isSelf={isSelf} sender={from} />
@@ -128,9 +130,9 @@ export default function ThreadMessage({
 									{senderLabel}
 								</span>
 								<ExternalSenderMark external={email.external_sender} />
-								{isDraft && <Badge variant="outline">Draft</Badge>}
+								{isDraft && <Badge variant="outline">{ui.draft}</Badge>}
 							</div>
-							<div className="text-xs text-kumo-subtle">To: {to}</div>
+							<div className="text-xs text-kumo-subtle">{ui.toLabel} {to}</div>
 						</div>
 					</div>
 					<div className="flex items-center gap-1 shrink-0">
@@ -138,14 +140,14 @@ export default function ThreadMessage({
 							{formatShortDate(email.date)}
 						</span>
 						{onViewSource && (
-							<Tooltip content="View source" side="bottom" asChild>
+							<Tooltip content={ui.viewSource} side="bottom" asChild>
 								<Button
 									variant="ghost"
 									shape="square"
 									size="sm"
 									icon={<CodeIcon size={14} />}
 									onClick={onViewSource}
-									aria-label="View source"
+									aria-label={ui.viewSource}
 									className="transition-opacity !h-6 !w-6"
 								/>
 							</Tooltip>
@@ -154,7 +156,7 @@ export default function ThreadMessage({
 							type="button"
 							onClick={onToggleExpand}
 							className="ml-1"
-							aria-label="Collapse message"
+							aria-label={ui.collapse}
 						>
 							<CaretUpIcon
 								size={14}
@@ -187,7 +189,7 @@ export default function ThreadMessage({
 								loading={isSending}
 								disabled={isSending}
 							>
-								{isSending ? "Sending..." : "Send"}
+								{isSending ? ui.sendingShort : ui.send}
 							</Button>
 						)}
 						{onEditDraft && (
@@ -198,7 +200,7 @@ export default function ThreadMessage({
 								onClick={onEditDraft}
 								disabled={isSending}
 							>
-								Edit
+								{ui.edit}
 							</Button>
 						)}
 						{onDeleteDraft && (
@@ -209,7 +211,7 @@ export default function ThreadMessage({
 								onClick={onDeleteDraft}
 								disabled={isSending}
 							>
-								Discard
+								{ui.discard}
 							</Button>
 						)}
 					</div>

@@ -10,6 +10,7 @@ import Header from "~/components/Header";
 import Sidebar from "~/components/Sidebar";
 import { useMailbox } from "~/queries/mailboxes";
 import { useUIStore } from "~/hooks/useUIStore";
+import { useUi } from "~/i18n/useLocale";
 
 export default function MailboxRoute() {
 	const { mailboxId } = useParams<{ mailboxId: string }>();
@@ -23,6 +24,7 @@ export default function MailboxRoute() {
 		closePanel,
 		closeComposeModal,
 	} = useUIStore();
+	const ui = useUi();
 
 	useEffect(() => {
 		if (
@@ -48,7 +50,7 @@ export default function MailboxRoute() {
 					onKeyDown={(e) => e.key === "Escape" && closeSidebar()}
 					role="button"
 					tabIndex={-1}
-					aria-label="Close sidebar"
+					aria-label={ui.closeSidebar}
 				/>
 			)}
 

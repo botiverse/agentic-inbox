@@ -5,6 +5,7 @@
 import { Button, Dialog } from "@cloudflare/kumo";
 import { displayFromTo, downloadFile } from "~/lib/utils";
 import type { Email } from "~/types";
+import { useUi } from "~/i18n/useLocale";
 
 interface PreviewImage {
 	url: string;
@@ -62,6 +63,7 @@ export default function EmailPanelDialogs({
 	onCloseSource,
 	onClosePreview,
 }: EmailPanelDialogsProps) {
+	const ui = useUi();
 	const sourceHeaders = sourceViewEmail ? getSourceHeaders(sourceViewEmail) : [];
 
 	return (
@@ -74,7 +76,7 @@ export default function EmailPanelDialogs({
 			>
 				<Dialog size="lg">
 					<Dialog.Title>
-						Email Source Headers
+						{ui.sourceHeaders}
 						{sourceViewEmail && (
 							<span className="text-sm font-normal text-kumo-subtle ml-2">
 								{sourceViewEmail.subject}
@@ -102,7 +104,7 @@ export default function EmailPanelDialogs({
 							</table>
 							{sourceHeaders.length === 0 && (
 								<p className="text-sm text-kumo-subtle text-center py-8">
-									No header data available for this email.
+									{ui.noHeaders}
 								</p>
 							)}
 						</div>
@@ -110,7 +112,7 @@ export default function EmailPanelDialogs({
 					<div className="flex justify-end mt-4">
 						<Dialog.Close>
 							<Button variant="secondary" size="sm">
-								Close
+								{ui.close}
 							</Button>
 						</Dialog.Close>
 					</div>
@@ -144,11 +146,11 @@ export default function EmailPanelDialogs({
 								}
 							}}
 						>
-							Download Original
+							{ui.downloadOriginal}
 						</Button>
 						<Dialog.Close>
 							<Button variant="primary" size="sm">
-								Close
+								{ui.close}
 							</Button>
 						</Dialog.Close>
 					</div>

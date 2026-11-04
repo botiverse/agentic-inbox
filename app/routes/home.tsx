@@ -16,6 +16,8 @@ import { EnvelopeIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { useQuery } from "@tanstack/react-query";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link as RouterLink } from "react-router";
+import LanguageSwitch from "~/components/LanguageSwitch";
+import { useUi } from "~/i18n/useLocale";
 import api from "~/services/api";
 import { avatarInitial } from "~/lib/utils";
 import {
@@ -31,6 +33,7 @@ export function meta() {
 }
 
 export default function HomeRoute() {
+	const ui = useUi();
 	const toastManager = useKumoToastManager();
 	const { data: mailboxes = [], isFetched: mailboxesFetched } = useMailboxes();
 	const createMailbox = useCreateMailbox();
@@ -68,11 +71,11 @@ export default function HomeRoute() {
 		e.preventDefault();
 		setCreateError(null);
 		if (!newPrefix || !selectedDomain) {
-			setCreateError("Please fill in all fields");
+			setCreateError(ui.fillFields);
 			return;
 		}
 		if (newPrefix.length < MIN_MAILBOX_LOCAL_PART_LENGTH) {
-			setCreateError(`Use at least ${MIN_MAILBOX_LOCAL_PART_LENGTH} characters before @.`);
+			setCreateError(ui.prefixShort.replace("{n}", String(MIN_MAILBOX_LOCAL_PART_LENGTH)));
 			return;
 		}
 		const email = `${newPrefix}@${selectedDomain}`;
@@ -80,12 +83,12 @@ export default function HomeRoute() {
 		setIsCreating(true);
 		try {
 			await createMailbox.mutateAsync({ email, name });
-			toastManager.add({ title: "Mailbox claimed!" });
+			toastManager.add({ title: ui.mailboxClaimed });
 			setIsCreateOpen(false);
 			setNewPrefix("");
 			setNewName("");
 		} catch (err: unknown) {
-			const message = (err instanceof Error ? err.message : null) || "Failed to create mailbox";
+			const message = (err instanceof Error ? err.message : null) || ui.failedCreate;
 			setCreateError(message);
 		} finally {
 			setIsCreating(false);
@@ -97,11 +100,11 @@ export default function HomeRoute() {
 		setIsDeleting(true);
 		try {
 			await deleteMailbox.mutateAsync(mailboxToDelete.id);
-			toastManager.add({ title: "Mailbox deleted" });
+			toastManager.add({ title: ui.mailboxDeleted });
 			setIsDeleteOpen(false);
 			setMailboxToDelete(null);
 		} catch {
-			toastManager.add({ title: "Failed to delete mailbox", variant: "error" });
+			toastManager.add({ title: ui.deleteFailed, variant: "error" });
 		} finally {
 			setIsDeleting(false);
 		}
@@ -120,17 +123,18 @@ export default function HomeRoute() {
 				<div className="mb-8">
 					<div className="flex items-center justify-between gap-3">
 						<div className="flex items-baseline gap-4">
-							<h1 className="text-2xl font-bold text-kumo-default">Mailboxes</h1>
+							<h1 className="text-2xl font-bold text-kumo-default">{ui.mailboxes}</h1>
 							<RouterLink to="/docs" className="text-sm text-kumo-subtle hover:text-kumo-default">
-								Help
+								{ui.help}
 							</RouterLink>
+							<LanguageSwitch />
 						</div>
 						<Button
 							variant="primary"
 							icon={<PlusIcon size={16} />}
 							onClick={() => setIsCreateOpen(true)}
 						>
-							New Mailbox
+							{ui.newMailbox}
 						</Button>
 					</div>
 					{domains.length > 0 && (
@@ -170,7 +174,7 @@ export default function HomeRoute() {
 									size="sm"
 									shape="square"
 									icon={<TrashIcon size={16} />}
-									aria-label={`Delete mailbox ${account.email}`}
+									aria-label={`${ui.deleteMailbox} ${account.email}`}
 									onClick={(e) => {
 										e.preventDefault();
 										e.stopPropagation();
@@ -195,18 +199,17 @@ export default function HomeRoute() {
 								/>
 							</div>
 							<h3 className="text-base font-semibold text-kumo-default mb-1.5">
-								No mailboxes yet
+								{ui.noMailboxes}
 							</h3>
 							<p className="text-sm text-kumo-subtle max-w-sm mb-5">
-								Claim a mailbox under your handle to receive email.
-								Use at least 8 characters before @ — e.g. <code>you-inbox@{selectedDomain || "mail.build"}</code>.
+								{ui.claimLead} {ui.claimExample.replace("{n}", String(MIN_MAILBOX_LOCAL_PART_LENGTH))} <code>you-inbox@{selectedDomain || "mail.build"}</code>.
 							</p>
 							<Button
 								variant="primary"
 								icon={<PlusIcon size={16} />}
 								onClick={() => setIsCreateOpen(true)}
 							>
-								Claim a mailbox
+								{ui.claimMailbox}
 							</Button>
 						</div>
 					</div>
@@ -217,7 +220,7 @@ export default function HomeRoute() {
 			<Dialog.Root open={isCreateOpen} onOpenChange={setIsCreateOpen}>
 				<Dialog size="sm" className="p-6">
 					<Dialog.Title className="text-base font-semibold mb-5">
-						Create New Mailbox
+						{ui.createMailbox}
 					</Dialog.Title>
 					<form onSubmit={handleCreate} className="space-y-4">
 						{createError && (
@@ -227,12 +230,12 @@ export default function HomeRoute() {
 						)}
 						<div>
 							<span className="text-sm font-medium text-kumo-default mb-1.5 block">
-								Email Address
+								{ui.emailAddress}
 							</span>
 							<div className="flex items-center gap-2">
 								<div className="flex-1">
 									<Input
-										aria-label="Address prefix"
+										aria-label={ui.addressPrefix}
 										placeholder="your-inbox"
 										minLength={MIN_MAILBOX_LOCAL_PART_LENGTH}
 										size="sm"
@@ -245,7 +248,7 @@ export default function HomeRoute() {
 								{domains.length > 1 ? (
 									<div className="flex-1">
 							<Select
-								aria-label="Domain"
+								aria-label={ui.domain}
 								value={selectedDomain}
 								onValueChange={(value) => {
 									if (value) setSelectedDomain(value);
@@ -260,14 +263,14 @@ export default function HomeRoute() {
 									</div>
 								) : (
 									<span className="text-sm text-kumo-subtle">
-										{selectedDomain || "no domain"}
+										{selectedDomain || ui.noDomain}
 									</span>
 								)}
 							</div>
 						</div>
 						<Input
-							label="Display Name (optional)"
-							placeholder="Info"
+							label={ui.displayNameOptional}
+							placeholder={ui.displayExample}
 							size="sm"
 							value={newName}
 							onChange={(e) => setNewName(e.target.value)}
@@ -276,7 +279,7 @@ export default function HomeRoute() {
 							<Dialog.Close
 								render={(props) => (
 									<Button {...props} variant="secondary" size="sm">
-										Cancel
+										{ui.cancel}
 									</Button>
 								)}
 							/>
@@ -287,7 +290,7 @@ export default function HomeRoute() {
 								loading={isCreating}
 								disabled={!selectedDomain}
 							>
-								Create
+								{ui.create}
 							</Button>
 						</div>
 					</form>
@@ -304,14 +307,14 @@ export default function HomeRoute() {
 			>
 				<Dialog size="sm" className="p-6">
 					<Dialog.Title className="text-base font-semibold mb-2">
-						Delete Mailbox
+						{ui.deleteMailbox}
 					</Dialog.Title>
 					<Dialog.Description className="text-kumo-subtle text-sm mb-5">
-						Are you sure you want to delete{" "}
+						{ui.deleteSure}{" "}
 						<strong className="text-kumo-default">
 							{mailboxToDelete?.email}
 						</strong>
-						? This action cannot be undone.
+						? {ui.cannotUndo}
 					</Dialog.Description>
 					<div className="flex justify-end gap-2">
 						<Dialog.Close
@@ -327,7 +330,7 @@ export default function HomeRoute() {
 							loading={isDeleting}
 							onClick={handleDelete}
 						>
-							Delete
+							{ui.delete}
 						</Button>
 					</div>
 				</Dialog>

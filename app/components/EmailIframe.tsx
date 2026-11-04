@@ -4,6 +4,7 @@
 
 import DOMPurify from "dompurify";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useUi } from "~/i18n/useLocale";
 
 interface EmailIframeProps {
 	body: string;
@@ -28,6 +29,7 @@ interface EmailIframeProps {
  *   iframe as a defense-in-depth layer.
  */
 export default function EmailIframe({ body, autoSize }: EmailIframeProps) {
+	const ui = useUi();
 	const iframeRef = useRef<HTMLIFrameElement>(null);
 	const [height, setHeight] = useState(autoSize ? 100 : 0);
 
@@ -145,7 +147,7 @@ ul, ol { padding-left: 20px; margin: 4px 0; }
 			className="block w-full border-0"
 			style={autoSize ? { height: `${height}px` } : { height: "100%" }}
 			sandbox="allow-scripts allow-popups allow-top-navigation-by-user-activation"
-			title="Email content"
+			title={ui.emailContent}
 		/>
 	);
 }

@@ -8,6 +8,7 @@ import { useParams } from "react-router";
 import { useComposeForm } from "~/hooks/useComposeForm";
 import RichTextEditor from "./RichTextEditor";
 import { useUIStore } from "~/hooks/useUIStore";
+import { useUi } from "~/i18n/useLocale";
 
 export default function ComposeEmail() {
 	const { mailboxId, folder } = useParams<{
@@ -16,6 +17,7 @@ export default function ComposeEmail() {
 	}>();
 	
 	const { isComposeModalOpen, closeComposeModal } = useUIStore();
+	const ui = useUi();
 
 	const {
 		to,
@@ -52,9 +54,9 @@ export default function ComposeEmail() {
 					<div className="flex items-center gap-2">
 						<div className="flex-1">
 							<Input
-								label="To"
+								label={ui.to}
 								type="text"
-								placeholder="recipient@example.com, another@example.com"
+								placeholder={ui.recipientPlaceholder}
 								size="sm"
 								value={to}
 								onChange={(e) => setTo(e.target.value)}
@@ -67,34 +69,34 @@ export default function ComposeEmail() {
 								onClick={() => setShowCcBcc(true)}
 								className="shrink-0 text-xs text-kumo-link hover:text-kumo-link-hover font-medium mt-5"
 							>
-								CC / BCC
+								{ui.ccBcc}
 							</button>
 						)}
 					</div>
 					{showCcBcc && (
 						<Input
-							label="CC"
+							label={ui.cc}
 							type="text"
 							size="sm"
 							value={cc}
 							onChange={(e) => setCc(e.target.value)}
-							placeholder="Separate multiple addresses with commas"
+							placeholder={ui.manyRecipients}
 						/>
 					)}
 					{showCcBcc && (
 						<Input
-							label="BCC"
+							label={ui.bcc}
 							type="text"
 							size="sm"
 							value={bcc}
 							onChange={(e) => setBcc(e.target.value)}
-							placeholder="Separate multiple addresses with commas"
+							placeholder={ui.manyRecipients}
 						/>
 					)}
 					<Input
-						label="Subject"
+						label={ui.subject}
 						type="text"
-						placeholder="Email subject"
+						placeholder={ui.subjectPlaceholder}
 						size="sm"
 						value={subject}
 						onChange={(e) => setSubject(e.target.value)}
@@ -102,7 +104,7 @@ export default function ComposeEmail() {
 					/>
 					<div>
 						<Text size="sm" DANGEROUS_className="font-medium mb-1.5 block">
-							Message
+							{ui.message}
 						</Text>
 						<RichTextEditor value={body} onChange={setBody} />
 					</div>
@@ -114,7 +116,7 @@ export default function ComposeEmail() {
 							onClick={closeComposeModal}
 							disabled={isSending}
 						>
-							Discard
+							{ui.discard}
 						</Button>
 						<div className="flex items-center gap-2">
 							<Button
@@ -126,7 +128,7 @@ export default function ComposeEmail() {
 								icon={<FloppyDiskIcon size={14} />}
 								onClick={handleSaveDraft}
 							>
-								{isSavingDraft ? "Saving..." : "Save as Draft"}
+								{isSavingDraft ? ui.saving : ui.saveAsDraft}
 							</Button>
 							<Button
 								type="submit"
@@ -136,7 +138,7 @@ export default function ComposeEmail() {
 								disabled={isSavingDraft || isSending}
 								icon={<PaperPlaneTiltIcon size={14} />}
 							>
-								{isSending ? "Sending..." : "Send"}
+								{isSending ? ui.sendingShort : ui.send}
 							</Button>
 						</div>
 					</div>
