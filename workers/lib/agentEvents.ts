@@ -13,7 +13,6 @@
 import {
 	decideNotify,
 	externalEventId,
-	notifyPayload,
 	notifySummary,
 	type InboxNotifyRouting,
 } from "./inboxNotify";
@@ -125,7 +124,6 @@ export async function postAgentNotification(
 	accessToken: string,
 	input: {
 		summary: string;
-		payload: Record<string, unknown>;
 		externalEventId: string;
 	},
 	fetchImpl: typeof fetch = fetch,
@@ -139,7 +137,6 @@ export async function postAgentNotification(
 		body: JSON.stringify({
 			kind: "notification",
 			summary: input.summary,
-			payload: input.payload,
 			externalEventId: input.externalEventId,
 		}),
 	});
@@ -233,14 +230,7 @@ export async function runInboundNotify(
 			},
 			token,
 			{
-				summary: notifySummary(input.mailbox, input.from, input.subject),
-				payload: notifyPayload({
-					mailbox: input.mailbox,
-					emailId: input.emailId,
-					from: input.from,
-					subject: input.subject,
-					rfcMessageId: input.rfcMessageId,
-				}),
+				summary: notifySummary({ mailbox: input.mailbox, emailId: input.emailId, from: input.from, subject: input.subject }),
 				externalEventId: await externalEventId(input.mailbox, input.rfcMessageId, input.emailId),
 			},
 			fetchImpl,

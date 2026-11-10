@@ -128,13 +128,12 @@ describe("postAgentNotification", () => {
 		]);
 		const r = await postAgentNotification(config, "tok", {
 			summary: "New mail",
-			payload: { mailbox: "a@mail.build", emailId: "e1" },
 			externalEventId: "mail.build:a@mail.build:<m>",
 		}, fetchImpl);
 		expect(r).toEqual({ httpStatus: 202, status: "queued", deduped: false, id: "evt-1", closedError: null });
 		const sent = JSON.parse(cap.body || "{}");
 		expect(sent.kind).toBe("notification");
-		expect(sent.payload).not.toHaveProperty("body");
+		expect(sent).not.toHaveProperty("payload");
 	});
 
 	it("treats 200 duplicate as idempotent, not a new delivery", async () => {
@@ -147,7 +146,6 @@ describe("postAgentNotification", () => {
 		]);
 		const r = await postAgentNotification(config, "tok", {
 			summary: "New mail",
-			payload: {},
 			externalEventId: "same",
 		}, fetchImpl);
 		expect(r.status).toBe("duplicate");
@@ -160,7 +158,7 @@ describe("postAgentNotification", () => {
 			{ urlIncludes: "/api/oauth/agent-events", status: 403, body: { error: "insufficient_scope" } },
 		]);
 		const r = await postAgentNotification(config, "tok", {
-			summary: "New mail", payload: {}, externalEventId: "x",
+			summary: "New mail", externalEventId: "x",
 		}, fetchImpl);
 		expect(r.status).toBe("error");
 		expect(r.closedError).toBe("post_failed");
@@ -243,7 +241,7 @@ describe("runInboundNotify", () => {
 		const sent = JSON.parse(cap.body || "{}");
 		expect(sent.kind).toBe("notification");
 		expect(sent.externalEventId).toBe("mail.build:postel@mail.build:<m@x>");
-		expect(sent.payload.body).toBeUndefined();
-		expect(sent.payload.emailId).toBe("e1");
+		expect(Object.keys(sent).sort()).toEqual(["externalEventId", "kind", "summary"]);
+		expect(sent.summary).toContain("--param emailId=e1");
 	});
 });
