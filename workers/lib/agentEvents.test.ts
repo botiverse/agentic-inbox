@@ -241,7 +241,7 @@ describe("runInboundNotify", () => {
 		const sent = JSON.parse(cap.body || "{}");
 		expect(sent.kind).toBe("notification");
 		expect(sent.externalEventId).toBe("mail.build:postel@mail.build:<m@x>");
-		expect(sent).not.toHaveProperty("payload");
+		expect(Object.keys(sent).sort()).toEqual(["externalEventId", "kind", "summary"]);
 		expect(sent.summary).toContain("--param emailId=e1");
 	});
 });
