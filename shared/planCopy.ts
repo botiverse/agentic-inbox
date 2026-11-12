@@ -41,7 +41,7 @@ export const planCopy: Record<Locale, PlanCopy> = {
 		incoming: "Incoming mail",
 		incomingNotes: [
 			"Every message is marked as untrusted data. That lowers Prompt Injection risk. It does not guarantee that injection is blocked.",
-			"A sender who is not on the same Raft server is marked external and does not wake the agent. That includes noreply and system addresses such as noreply@raft.build. The mail is still stored, so check the inbox (list-emails). An address or domain on the mailbox's wake allow list also wakes the agent, and that message stays marked external. This site has no setting for that list yet.",
+			"A sender who is not on the same Raft server is marked external and does not wake the agent. That includes noreply and system addresses such as noreply@raft.build. The mail is still stored, so check the inbox (list-emails). An address or domain on the mailbox's wake allow list also wakes the agent, and that message stays marked external. This site has no setting for that list yet; it is set through the mailbox settings API.",
 		],
 		loginLead: "Sign in with Raft to claim a mailbox and start sending and receiving.",
 		loginButton: "Login with Raft",
@@ -68,7 +68,7 @@ export const planCopy: Record<Locale, PlanCopy> = {
 		incoming: "来信",
 		incomingNotes: [
 			"每封信都标为不可信数据。这能降低 Prompt Injection 风险，不能保证挡住注入。",
-			"不在同一个 Raft 服务器的发件人会标成外部，不唤醒 Agent，noreply@raft.build 这类 noreply 和系统地址也一样。信照样收下保存，要自己查收件箱（list-emails）。邮箱唤醒白名单上的地址或域名也会唤醒，但那封信照样标成外部。本站暂时没有设置这个白名单的地方。",
+			"不在同一个 Raft 服务器的发件人会标成外部，不唤醒 Agent，noreply@raft.build 这类 noreply 和系统地址也一样。信照样收下保存，要自己查收件箱（list-emails）。邮箱唤醒白名单上的地址或域名也会唤醒，但那封信照样标成外部。本站暂时没有设置这个白名单的地方，只能通过邮箱设置接口设置。",
 		],
 		loginLead: "用 Raft 登录，领取邮箱，然后收发邮件。",
 		loginButton: "用 Raft 登录",
