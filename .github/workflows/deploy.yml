@@ -7,7 +7,7 @@
 # carries its OWN scoped credential, so "deploy" is an action anyone authorized
 # can trigger without borrowing an identity.
 #
-# THE GATE IS WHO CAN DISPATCH. This workflow deliberately does not restrict which
+# THE GATE IS WHO CAN PUSH TO main AND WHO CAN DISPATCH. This workflow deliberately does not restrict which
 # ref may be deployed (you must be able to ship a hotfix branch), so the only
 # control is GitHub's "who may run this workflow" permission. Do not read the
 # existence of CI as "CI constrains what reaches production" — it does not; the
@@ -20,20 +20,30 @@
 # Email Routing, or Access.
 name: deploy
 
-# MANUAL ONLY, by artin's call: a deploy is an explicit decision, not a
-# side effect of pushing. `ref` lets you deploy any branch/tag/SHA, so work can
-# continue on a feature branch while you choose exactly what goes to production.
+# AUTOMATIC ON main, by artin's call (2026-11-14, "我想自动"): every push to
+# main deploys (normally a merged PR; a direct push deploys too), then the last
+# step checks /health reports that SHA. Before this it was manual only, which
+# left merged work undeployed until someone remembered.
+# Manual dispatch stays for redeploys and hotfix branches (`ref` = any
+# branch/tag/SHA). A hotfix shipped that way is REPLACED by the next push to
+# main, and a queued one is dropped if a push lands first (one concurrency
+# group): land the fix on main too.
 #
 # NOTE: GitHub only offers workflow_dispatch for workflows present on the DEFAULT
 # branch, so this file has to reach `main` before the button exists — even though
 # the ref you deploy can be any branch.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
         description: "Git ref (branch, tag or SHA) to deploy"
         required: false
         default: ""
+
+permissions:
+  contents: read
 
 concurrency:
   # Never let two deploys race; a queued one supersedes, but the in-flight one is

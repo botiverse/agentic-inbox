@@ -54,7 +54,12 @@ shipped; they merely finally came along for the ride. (Gogo, 2026-08-19.)
 
 ## Deploying
 
-Manual only — a deploy is a decision, not a side effect of pushing.
+**Automatic since 2026-11-14 (artin):** every push to `main` runs the `deploy`
+workflow (typecheck, test, build, target check, deploy, then `/health` must report
+the pushed SHA). Nothing to do after a merge but check the run went green.
+
+Manual dispatch remains for redeploys and hotfix branches. A hotfix deployed that
+way is replaced by the next push to `main`, so land the fix on `main` as well:
 
 1. Pick the target and **say which branch's HEAD it is and why**, not just a SHA.
    A bare SHA looks like it came from nowhere twelve minutes later.
