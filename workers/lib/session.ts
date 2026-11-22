@@ -144,10 +144,28 @@ export function readLoginState(request: Request): string | null {
 // ── Where to land after login (same path and lifetime as the login state) ──
 const LOGIN_NEXT_COOKIE_NAME = "agentic_inbox_login_next";
 
-/** A same-origin relative path (`/x`, not `//host` or `/\\host`), else null. */
+const NEXT_BASE = "https://next.invalid";
+
+/**
+ * A same-origin relative path, else null. Refuses `//host`, `/\\host` and any
+ * control character: URL parsers drop tab and newline, so `/\t/evil.example`
+ * would reach `Location` as `//evil.example`. The value must also resolve to
+ * the same origin; the parsed path, query and hash are returned.
+ */
 export function safeNextPath(value: string | null): string | null {
 	if (!value || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return null;
-	return value;
+	if (/[\u0000-\u001f\u007f]/.test(value)) return null;
+	let parsed: URL;
+	try {
+		parsed = new URL(value, NEXT_BASE);
+	} catch {
+		return null;
+	}
+	if (parsed.origin !== NEXT_BASE) return null;
+	// Dot segments can normalize to a `//` path (`/..//evil` → `//evil`).
+	const path = parsed.pathname + parsed.search + parsed.hash;
+	if (path.startsWith("//") || path.startsWith("/\\")) return null;
+	return path;
 }
 
 export function loginNextCookie(request: Request, next: string, maxAgeSeconds: number): string {

@@ -37,7 +37,7 @@ describe("Login-with-Raft login remembers where the person was going", () => {
 		expect(cookies).toContainEqual(expect.stringMatching(/^agentic_inbox_login_next=%2Fmailbox%2Fabc%3Ffolder%3Dinbox; Path=\/auth\/raft\/callback;/));
 	});
 
-	it.each(["//evil.example/x", "/\\evil.example", "https://evil.example/"])("refuses next=%s", async (next) => {
+	it.each(["//evil.example/x", "/\\evil.example", "https://evil.example/", "/\t/evil.example", "/\n/evil.example"])("refuses next=%s", async (next) => {
 		const res = await authApp.request(`https://mail.build/auth/raft/login?next=${encodeURIComponent(next)}`, {}, env);
 		expect(res.headers.getSetCookie()).toContainEqual(expect.stringMatching(/^agentic_inbox_login_next=; .*Max-Age=0/));
 	});

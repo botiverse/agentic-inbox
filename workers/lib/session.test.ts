@@ -146,5 +146,23 @@ describe("login next path", () => {
 		expect(readLoginNext(req("agentic_inbox_login_next=%2F%2Fevil.example"))).toBeNull();
 		expect(readLoginNext(req("agentic_inbox_login_next=%E0%A4%A"))).toBeNull();
 		expect(safeNextPath("/\\evil")).toBeNull();
+		expect(safeNextPath("/mailbox/abc?x=1#top")).toBe("/mailbox/abc?x=1#top");
+	});
+
+	it.each(["/%09/evil.example", "/%0A/evil.example", "/%0D/evil.example", "/%00/x", "/%7F/x"])(
+		"refuses a control character that would turn %s into //host",
+		async (encoded) => {
+			const { safeNextPath, readLoginNext } = await import("./session");
+			expect(safeNextPath(decodeURIComponent(encoded))).toBeNull();
+			const req = new Request("https://mail.build/auth/raft/callback", { headers: { Cookie: `agentic_inbox_login_next=${encoded}` } });
+			expect(readLoginNext(req)).toBeNull();
+		},
+	);
+
+	it("refuses a path whose dot segments normalize to //host", async () => {
+		const { safeNextPath } = await import("./session");
+		expect(safeNextPath("/..//evil.example")).toBeNull();
+		expect(safeNextPath("/a/..//evil.example")).toBeNull();
+		expect(safeNextPath("/a/../b")).toBe("/b");
 	});
 });
