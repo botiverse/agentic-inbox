@@ -137,3 +137,14 @@ describe("CSRF login-state", () => {
 		expect(await loginStatesMatch(s, "")).toBe(false);
 	});
 });
+
+describe("login next path", () => {
+	it("reads back only a same-origin relative path", async () => {
+		const { loginNextCookie, readLoginNext, safeNextPath } = await import("./session");
+		const req = (cookie: string) => new Request("https://mail.build/auth/raft/callback", { headers: { Cookie: cookie.split(";")[0] } });
+		expect(readLoginNext(req(loginNextCookie(new Request("https://mail.build/"), "/mailbox/abc?x=1", 60)))).toBe("/mailbox/abc?x=1");
+		expect(readLoginNext(req("agentic_inbox_login_next=%2F%2Fevil.example"))).toBeNull();
+		expect(readLoginNext(req("agentic_inbox_login_next=%E0%A4%A"))).toBeNull();
+		expect(safeNextPath("/\\evil")).toBeNull();
+	});
+});

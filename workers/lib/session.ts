@@ -141,6 +141,33 @@ export function readLoginState(request: Request): string | null {
 	return match ? decodeURIComponent(match[1]) : null;
 }
 
+// ── Where to land after login (same path and lifetime as the login state) ──
+const LOGIN_NEXT_COOKIE_NAME = "agentic_inbox_login_next";
+
+/** A same-origin relative path (`/x`, not `//host` or `/\\host`), else null. */
+export function safeNextPath(value: string | null): string | null {
+	if (!value || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return null;
+	return value;
+}
+
+export function loginNextCookie(request: Request, next: string, maxAgeSeconds: number): string {
+	return `${LOGIN_NEXT_COOKIE_NAME}=${encodeURIComponent(next)}; Path=${LOGIN_STATE_PATH}; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${cookieSecurity(request)}`;
+}
+
+export function clearLoginNextCookie(request: Request): string {
+	return `${LOGIN_NEXT_COOKIE_NAME}=; Path=${LOGIN_STATE_PATH}; HttpOnly; SameSite=Lax; Max-Age=0${cookieSecurity(request)}`;
+}
+
+export function readLoginNext(request: Request): string | null {
+	const match = (request.headers.get("Cookie") ?? "").match(new RegExp(`(?:^|;\\s*)${LOGIN_NEXT_COOKIE_NAME}=([^;]+)`));
+	if (!match) return null;
+	try {
+		return safeNextPath(decodeURIComponent(match[1]));
+	} catch {
+		return null;
+	}
+}
+
 /** Constant-time compare of two 43-char base64url login-state values. */
 export async function loginStatesMatch(presented: string, expected: string): Promise<boolean> {
 	if (!/^[A-Za-z0-9_-]{43}$/.test(presented) || !/^[A-Za-z0-9_-]{43}$/.test(expected)) return false;
