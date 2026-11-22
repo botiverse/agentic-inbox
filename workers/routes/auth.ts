@@ -12,6 +12,10 @@ import {
 	readLoginState,
 	clearLoginStateCookie,
 	loginStatesMatch,
+	safeNextPath,
+	loginNextCookie,
+	readLoginNext,
+	clearLoginNextCookie,
 } from "../lib/session";
 import {
 	type RaftOAuthConfig,
@@ -25,6 +29,10 @@ import {
 	raftSetupUrl,
 	isBrowserCallbackFlow,
 } from "../lib/raftAuth";
+import { isRaftHostCancelledCallback } from "@botiverse/raft-sdk/app";
+import { RAFT_LOGIN_PATH } from "../lib/raftHostSignIn";
+import { renderLandingHtml } from "../../shared/landingHtml";
+import { localeFromRequest } from "../../shared/locale";
 
 const SESSION_TTL_SECONDS = 60 * 60 * 8; // 8h
 const LOGIN_STATE_TTL_SECONDS = 600; // 10min
@@ -71,7 +79,11 @@ authApp.get("/auth/raft/login", async (c) => {
 		callbackUrl.protocol = "https:";
 	}
 	const location = raftSetupUrl(config, callbackUrl.toString(), state);
-	c.header("Set-Cookie", loginStateCookie(c.req.raw, state, LOGIN_STATE_TTL_SECONDS));
+	c.header("Set-Cookie", loginStateCookie(c.req.raw, state, LOGIN_STATE_TTL_SECONDS), { append: true });
+	// Remember the page the person was opening (e.g. a mailbox from a Raft App
+	// link) so the callback lands there, not on `/`.
+	const next = safeNextPath(url.searchParams.get("next"));
+	c.header("Set-Cookie", next ? loginNextCookie(c.req.raw, next, LOGIN_STATE_TTL_SECONDS) : clearLoginNextCookie(c.req.raw), { append: true });
 	c.header("Cache-Control", "no-store");
 	return c.redirect(location, 302);
 });
@@ -80,6 +92,17 @@ authApp.all("/auth/raft/callback", async (c) => {
 	if (!raftLoginConfigured(c.env)) return c.text("Login-with-Raft is not configured", 500);
 	const config = readRaftConfig(c.env);
 	const url = new URL(c.req.url);
+	// The person cancelled Raft's consent sheet (often after an automatic
+	// `Raft-Host` sign-in): show the normal landing page, not an error. This
+	// runs before the state check on purpose: it creates no session and only
+	// clears our own login cookies, which a wrong-state callback does anyway.
+	// The Raft-Host guard cookie stays set, so going back to `/` does not loop.
+	if (isRaftHostCancelledCallback(url)) {
+		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw), { append: true });
+		c.header("Set-Cookie", clearLoginNextCookie(c.req.raw), { append: true });
+		c.header("Cache-Control", "no-store");
+		return c.html(renderLandingHtml(localeFromRequest(c.req.raw), RAFT_LOGIN_PATH), 200);
+	}
 	const code = url.searchParams.get("code") ?? "";
 	const presentedState = url.searchParams.get("state");
 	const expectedState = readLoginState(c.req.raw);
@@ -102,10 +125,13 @@ authApp.all("/auth/raft/callback", async (c) => {
 		const sealed = await sealSession({ principal, expiresAt: Date.now() + ttl * 1000 }, c.env.RAFT_SESSION_SECRET as string);
 		c.header("Set-Cookie", sessionCookie(c.req.raw, sealed, ttl), { append: true });
 		c.header("Set-Cookie", clearLoginStateCookie(c.req.raw), { append: true });
+		c.header("Set-Cookie", clearLoginNextCookie(c.req.raw), { append: true });
 		c.header("Cache-Control", "no-store");
+		// The Raft-Host guard cookie is left to expire (10 min) rather than
+		// cleared: a signed-in visitor never reaches it, and if the session
+		// cookie were ever dropped it still stops a silent redirect loop.
 		if (browserFlow) {
-			const requested = url.searchParams.get("next") ?? "/";
-			const nextPath = requested.startsWith("/") && !requested.startsWith("//") ? requested : "/";
+			const nextPath = safeNextPath(url.searchParams.get("next")) ?? readLoginNext(c.req.raw) ?? "/";
 			return c.redirect(nextPath, 302);
 		}
 		return c.body(null, 204);

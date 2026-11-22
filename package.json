@@ -29,6 +29,7 @@
 		"e2e": "node scripts/e2e-dynamic-mailbox.mjs"
 	},
 	"dependencies": {
+		"@botiverse/raft-sdk": "^0.40.0",
 		"@cloudflare/ai-chat": "^0.1.8",
 		"@cloudflare/kumo": "^1.13.0",
 		"@phosphor-icons/react": "^2.1.10",

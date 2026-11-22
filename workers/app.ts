@@ -34,6 +34,7 @@ import {
 	GENERIC_LOGIN_FAILURE,
 } from "./lib/raftAuth";
 import { isAuthExemptPath } from "./lib/authExempt";
+import { withRaftHostAutoSignIn, RAFT_LOGIN_PATH } from "./lib/raftHostSignIn";
 import { routingFromPrincipal } from "./lib/inboxNotify";
 import { renderLandingHtml } from "../shared/landingHtml";
 import { isLocale, localeCookie, localeFromRequest } from "../shared/locale";
@@ -157,7 +158,7 @@ app.use("*", async (c, next) => {
 		if (wantsHtmlRedirect(c.req.raw)) {
 			const nextParam = encodeURIComponent(path + new URL(c.req.url).search);
 			const locale = localeFromRequest(c.req.raw);
-			return c.html(renderLandingHtml(locale, `/auth/raft/login?next=${nextParam}`), 200, { "Cache-Control": "no-store" });
+			return c.html(renderLandingHtml(locale, `${RAFT_LOGIN_PATH}?next=${nextParam}`), 200, { "Cache-Control": "no-store" });
 		}
 		return c.json({ error: "Authentication required" }, 401);
 	}
@@ -300,7 +301,9 @@ app.all("*", (c) => {
 
 // Export the Hono app as the default export with an email handler
 export default {
-	fetch: app.fetch,
+	// Opened from a Raft App entry (`Raft-Host`) without a session: go straight
+	// to Login with Raft instead of the landing page (lib/raftHostSignIn.ts).
+	fetch: withRaftHostAutoSignIn((env: Env) => !import.meta.env.DEV && raftLoginConfigured(env), app.fetch),
 	// `event` is Cloudflare's ForwardableEmailMessage. We previously declared it as
 	// just `{raw, rawSize}`, which typed away `setReject` — the very capability
 	// needed to refuse unknown recipients in-session instead of accepting them and
